@@ -1,0 +1,2130 @@
+---
+title: "Generalizabilty_simulation"
+author: "Kyungeun Jenny Jeon"
+date: "2024-08-22"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(survey)
+library(tmle)
+library(SuperLearner)
+library(dbarts)
+library(tidyr)
+library(dplyr)
+library(cobalt)
+library(reshape2)
+library(ggplot2)
+library(kableExtra)
+library(webshot)
+```
+
+# 0. Basic functions for simulation
+```{r Basic functions}
+propfunc<-function(input,scenario,size){
+  
+  #'input' is the proportion of the selected sample size out of population (if input=0.1, we want to select 10% of population)
+  F.sample.cor <- function(x, rho) {
+    y <- (rho * (x - mean(x)))/sqrt(var(x)) + sqrt(1 - rho^2) * rnorm(length(x))
+    return(y)
+    }  
+  
+  b1 <- 0.9
+  b2 <- -0.25
+  b3 <- 0.75
+  b4 <- -0.4
+  b5 <- -0.8
+  b6 <- -0.5
+  b7 <- 0.7
+  
+  w1 <- rnorm(size, mean=0, sd=1)
+  w2 <- rnorm(size, mean=0, sd=1)
+  w3 <- rnorm(size, mean=0, sd=1)
+  w4 <- rnorm(size, mean=0, sd=1)
+  w5 <- F.sample.cor(w1, 0.2)
+  w6 <- F.sample.cor(w2, 0.9)
+  w7 <- rnorm(size, mean=0, sd=1)
+
+  y<-vector()
+  x<-seq(-10,10,0.01)
+  if (scenario=="A"){
+    for (i in 1:length(x)){
+      y[i]<-mean((1 + exp( -(x[i] + b1*w1 + b2*w2 + b3*w3 + b4*w4 + b5*w5 + b6*w6 + b7*w7
+      ) ) )^-1)
+    }
+  }
+  if (scenario=="D"){
+    for (i in 1:length(x)){
+      y[i]<-mean((1 + exp( -(x[i] + b1*w1 + b2*w2 + b3*w3 + b4*w4 + b5*w5 + b6*w6 + b7*w7
+                             + b1*0.5*w1*w3 + b2*0.7*w2*w4 + b4*0.5*w4*w5 + b5*0.5*w5*w6) ) )^-1)}  
+  }
+  
+  if (scenario=="G"){
+    for (i in 1:length(x)){
+      y[i]<-mean((1 + exp( -(x[i] + b1*w1 + b2*w2 + b3*w3 + b4*w4 + b5*w5 + b6*w6 + b7*w7
+                             + b2*w2*w2 + b4*w4*w4 + b7*w7*w7 + b1*0.5*w1*w3 + b2*0.7*w2*w4 +b3*0.5*w3*w5
+                             + b4*0.7*w4*w6 + b5*0.5*w5*w7 + b1*0.5*w1*w6 + b2*0.7*w2*w3 + b3*0.5*w3*w4
+                             + b4*0.5*w4*w5 + b5*0.5*w5*w6) ) )^-1)}
+  }
+  
+  output<-vector(length=length(input))
+  for (j in 1:length(input)){
+    output[j]<-x[which.min(abs(y-input[j]))]
+  }
+  return(output)
+}
+
+logit <- function(p) log(p/(1-p))
+
+#function to induce correlation between covariates
+F.sample.cor <- function(x, rho) {
+  y <- (rho * (x - mean(x)))/sqrt(var(x)) + sqrt(1 - rho^2) * rnorm(length(x))
+  return(y)
+}
+
+### population generation function ###
+F.generate.pop2 <- function(size, scenario, prop) {
+  
+  w1 <- rnorm(size, mean=0, sd=1)
+  w2 <- rnorm(size, mean=0, sd=1)
+  w3 <- rnorm(size, mean=0, sd=1)
+  w4 <- rnorm(size, mean=0, sd=1)
+  w5 <- F.sample.cor(w1, 0.2)
+  w6 <- F.sample.cor(w2, 0.9)
+  w7 <- rnorm(size, mean=0, sd=1)
+  
+  # scenarios for data generation models 
+  # A: model with additivity and linearity
+  # D: mild non-additivity
+  # G: moderate non-additivity and non-linearity
+  
+  # binary exposure modeling
+  if (scenario == "A") {    
+    S_trueps <- (1 + exp( -(prop + b1*w1 + b2*w2 + b3*w3 + b4*w4 + b5*w5 + b6*w6 + b7*w7) ) )^-1
+    } else
+      if (scenario == "D") {
+        S_trueps <- (1 + exp( -(prop + b1*w1 + b2*w2 + b3*w3 + b4*w4 + b5*w5 + b6*w6 + b7*w7
+                                    + b1*0.5*w1*w3 + b2*0.7*w2*w4 + b4*0.5*w4*w5 + b5*0.5*w5*w6) ) )^-1
+        } else
+          if (scenario == "G") {
+                S_trueps <- (1 + exp( -(prop + b1*w1 + b2*w2 + b3*w3 + b4*w4 + b5*w5 + b6*w6 + b7*w7
+                                          + b2*w2*w2 + b4*w4*w4 + b7*w7*w7 + b1*0.5*w1*w3 + b2*0.7*w2*w4 +b3*0.5*w3*w5
+                                          + b4*0.7*w4*w6 + b5*0.5*w5*w7 + b1*0.5*w1*w6 + b2*0.7*w2*w3 + b3*0.5*w3*w4
+                                          + b4*0.5*w4*w5 + b5*0.5*w5*w6) ) )^-1
+                }
+  
+  data <- as.data.frame(cbind(w1, w2, w3 ,w4, w5, w6, w7, S_trueps))
+  
+  #y1: y1 and y0 #calculate true TATE
+  data$y0 <- a0 + a1*data$w1 + a2*data$w2 + a3*data$w3 + a4*data$w4 + a5*data$w5 + a6*data$w6 + a7*data$w7
+  data$y1 <- a0 + g1 + a1*data$w1 + a2*data$w2 + a3*data$w3 + a4*data$w4 + a5*data$w5 + a6*data$w6 + a7*data$w7 +
+    a11*data$w1 + a13*data$w3 + a17*data$w7
+  delta_true_data_y <- mean(data$y1-data$y0) #same with delta_true <- mean(y1-y0)
+  
+  #y2(=k): y1 and y0 #calculate true TATE
+  data$k1 <- a0 + g1 + a1*data$w1 + a2*data$w2 + a3*data$w3 + a4*data$w4 + a5*data$w5 + a6*data$w6 + a7*data$w7 +
+    a12*data$w2 + a15*data$w5 + a16*data$w6
+  delta_true_data_k <- mean(data$k1-data$y0) #same with delta_true <- mean(k1-y0)
+  
+  # create simulation dataset
+  
+  return(list(data=data, tate_y=delta_true_data_y, tate_k=delta_true_data_k))
+}
+
+##outcome model coefficients
+outcome<-function(x){ 
+  if (x=="3"){
+    a0 <<- -3.85
+    a1 <<- 0.3
+    a2 <<- -0.36
+    a3 <<- -0.73
+    a4 <<- -0.2
+    a5 <<- 0.10
+    a6 <<- -0.19
+    a7 <<- 0.26
+    a11 <<- 2.85
+    a13 <<- 2.98
+    a17 <<- -0.5
+    a12 <<- 2.85
+    a15 <<- 2.98
+    a16 <<- -0.5
+  } else
+    if (x=="5"){
+    a0 <<- -3.85
+    a1 <<- 0.3
+    a2 <<- -0.36
+    a3 <<- -0.73
+    a4 <<- -0.2
+    a5 <<- 0.10
+    a6 <<- -0.19
+    a7 <<- 0.26
+    a11 <<- 2.85
+    a13 <<- 2.98
+    a17 <<- -0.5
+    a7sq <<- 0.4
+    a17sq <<- 1.5
+}
+}
+```
+```{r Get prop for RCT size}
+propfunc(input=0.1,scenario="A",size=10000) #-3.0885 => 10% of 10,000 population or -3.15
+#-3.09, -3.15, -3.16, -3.12 => -3.169 is the final decision
+```
+```{r Set parameters}
+#### selection model coefficients ####
+#b0 <- -3.169 ####################### change if pop size 1000 to -3.09
+b1 <- 0.9
+b2 <- -0.25
+b3 <- 0.75
+b4 <- -0.4
+b5 <- -0.8
+b6 <- -0.5
+b7 <- 0.7
+#main effect of treatment
+g1 <- 1
+outcome(3) #a coefficients
+```
+```{r Get one single population}
+set.seed(123)
+data.gen<-F.generate.pop2(size=10000, scenario="A", prop=-3.169)
+data <- data.gen$data
+true_tate_y <- data.gen$tate_y
+true_tate_k <- data.gen$tate_k
+true_tate_y #0.9712118
+true_tate_k #1.015682
+
+#check if RCT is selected well.
+size=10000
+data$S<-rbinom(size,1,p=data$S_trueps)
+nrow(data[data$S==1,]) #1000
+nrow(data[data$S==0,]) #9000
+#write.csv(data,"data_20241002.csv")
+
+#get the sample RCT
+#selection model 
+data$S<-rbinom(size,1,p=data$S_trueps)
+#treatment assignment, random given selection
+data$T<-vector(length=size)
+data$T[data$S=="1"][sample(sum(data$S),sum(data$S)*.5)]<-1
+data$T[data$S=="0"]<-NA
+data$y.obs <- data$T*data$y1 + (1-data$T)*data$y0 + rnorm(size, 0, 0.2) 
+data$k.obs <- data$T*data$k1 + (1-data$T)*data$y0 + rnorm(size, 0, 0.2)  
+data
+```
+```{r Basic functions for AIPW}
+#for AIPW, we need (1) predicted outcome (2) separate weights
+OM_est<-function(p1mod, p0mod, data){
+    #predict Y1 model
+    S1data_T1<-subset(data, S==1 & T==1)
+    OR1mod<-glm(p1mod, family=gaussian, data=S1data_T1)
+    p1<- predict(OR1mod, newdata=data, type="response")
+    data$p1<-p1
+    
+    #predict Y0 model
+    S1data_T0<-subset(data, S==1 & T==0)
+    OR0mod<-glm(p0mod, family=gaussian, data=S1data_T0)
+    p0<- predict(OR0mod, newdata=data, type="response")
+    data$p0<-p0
+    
+    #mean difference
+    diff<-mean(data$p1)-mean(data$p0)
+    list<-list(mu1=mean(data$p1), mu0=mean(data$p0), diff=diff, 
+               p1=p1, p0=p0, OR1mod=OR1mod, OR0mod=OR0mod)
+    return(list)
+}
+
+#currently we don't use it.
+generate_weights<-function(Smod, Tmod, data){
+    #selection probability
+    S1data<-subset(data, S==1)
+    w_reg<-glm(Smod, family="binomial", data=data)
+    ps<- predict(w_reg, newdata=data, type="response") 
+    
+    #treatment probability
+    w_reg2<-glm(Tmod, family="binomial", data=S1data)
+    pt<- predict(w_reg2, newdata=data, type="response")
+    w = (data$T*data$S)/(ps*pt) + ((1 - data$T) *data$S) /(ps*(1-pt))
+    data$w <- w
+    data$w[is.na(data$w)] <- 0
+    list<-list(w=w, dat=data, Smod=w_reg, Tmod=w_reg2, ps=ps, pt=pt)
+    return(list)
+}
+
+AIPW1_est<-function(data, w, y="y.obs"){
+    T<-data$T #treatment
+    S<-data$S #RCT
+    p1<-data$p1
+    p0<-data$p0
+    #Y<-data$y.obs
+    Y<-ifelse(is.na(data[[y]]), 0, data[[y]])
+    T<-ifelse(is.na(data$T), 0, data$T)
+    w <- ifelse(is.na(w),0,w) #when using different weights, this should be deactivated?
+    mu1<-mean(S*T*w*(Y-p1) + p1) #p1,p0 is based rct (without weights)
+    mu0<-mean(S*(1-T)*w*(Y-p0) + p0)
+    diff <-mu1 - mu0
+    estimates<-data.frame(estimator="AIPW1",mu1=mu1, mu0=mu0, diff=diff)
+    return(estimates)
+}
+
+AIPW2_est<-function(data, w, y='y.obs'){
+    T<-data$T #treatment
+    S<-data$S #RCT
+    #Y<-data$y.obs
+    Y<-ifelse(is.na(data[[y]]), 0, data[[y]])
+    T<-ifelse(is.na(data$T), 0, data$T)
+    w <- ifelse(is.na(w),0,w) #when using different weights, this should be deactivated
+    p1<-data$p1
+    p0<-data$p0
+    sum1_AIPW2<-sum(S*T*w*(Y-p1))
+    sum0_AIPW2<-sum(S*(1-T)*w*(Y-p0))
+    norm1<-(sum(S*T*w))^-1
+    norm0<-(sum(S*(1-T)*w))^-1
+    mu1<-norm1*sum1_AIPW2 + mean(p1)
+    mu0<-norm0*sum0_AIPW2 + mean(p0)
+    diff<-mu1 - mu0
+    estimates<-data.frame(estimator="AIPW2",mu1=mu1, mu0=mu0, diff=diff)
+    return(estimates)
+}
+```
+
+
+# 1. Finalized code 
+# 1-1) updated version with the same weights (LR)
+```{r Function to get RCT and estimate TATE (withem)}
+#boot=10000
+analysis.function.withem.same<-
+  function(data, size){
+    
+    #Smod = S~w1+w2+w3+w4+w5+w6+w7
+    #Amod = T~w1+w2+w3+w4+w5+w6+w7
+    #p1mod(or p0mod) = y.obs~w1+w2+w3+w4+w5+w6+w7
+    
+    # ============================ selection model =============================
+    data$S<-rbinom(size,1,p=data$S_trueps)
+    #treatment assignment, random given selection
+    data$T<-vector(length=size)
+    data$T[data$S=="1"][sample(sum(data$S),sum(data$S)*.5)]<-1
+    data$T[data$S=="0"]<-NA
+    data$y.obs <- data$T*data$y1 + (1-data$T)*data$y0 + rnorm(size, 0, 0.2) 
+    data$k.obs <- data$T*data$k1 + (1-data$T)*data$y0 + rnorm(size, 0, 0.2) 
+    
+    # ============================ Weights estimation ==========================
+    #Logistic regression
+    glm.model <- glm(S~w1+w2+w3+w4+w5+w6+w7, family="binomial",data=data)
+    predsGLM<-as.vector(fitted(glm.model))
+
+    #SuperLearner
+    predsSL.Luedtke <- 
+      SuperLearner::SuperLearner(
+        Y=data$S,
+        X=data[,c(paste("w",1:7,sep=""))],
+        SL.library=c("SL.gam","SL.glm","SL.glm.interaction","SL.nnet","SL.rpart"),
+        family="binomial",
+        method="method.NNLS",
+        cvControl=list(V=5,stratifyCV=TRUE,shuffle=TRUE)
+        )$SL.predict
+
+    #get weights (new)
+    preds <- cbind(predsGLM, predsSL.Luedtke, data$S_trueps)
+    colnames(preds)<-c("IPSW.LR","IPSW.SL","trueps")
+    preds<-as.matrix(preds)
+    weights<-apply(preds,2,function(x)ifelse(data$S==1,1/x,NA))
+    
+    #
+    #
+    # ============================ For Y outcome ===============================
+    #
+    # 1) (outcome Y) IPSW ================================== 
+    #1-1) IPSW (y.obs ~ S)
+    design <- apply(weights,2,function(z) svydesign(ids=~1, weights=z[data$S==1], data=data[data$S==1,]))
+    delta_hat <- unlist(lapply(design,function(z) {
+      tryCatch(svyglm(y.obs~T, data=data[data$S==1,], maxit=10000, design=z)$coef[2], error=function(e) NA)}))
+    IPSW_res <- data.frame(matrix(cbind(delta_hat), nrow=1))
+    colnames(IPSW_res) <- c('IPSW.LR','IPSW.SL','trueps')
+    
+    #Added #####################################################################
+    #unadj + unweight
+    IPSW_res.unw <- tryCatch(coef(glm(y.obs ~ T, data=data[data$S==1,]))[2], error=function(e) NA)
+    ############################################################################
+    
+    # 2) (outcome Y) AIPW ==================================
+    OMest <- OM_est(p1mod = y.obs ~ w1 + w2 + w3 + w4 + w5 + w6 + w7,
+                    p0mod = y.obs ~ w1 + w2 + w3 + w4 + w5 + w6 + w7,
+                    data=data)
+    data$p1 <- OMest$p1
+    data$p0 <- OMest$p0
+    #get weights for each scenario 
+    #weight_data <- generate_weights(Smod=S ~ w1 + w2 + w3 + w4 + w5 + w6 + w7, 
+    #                                Tmod=T ~ w1 + w2 + w3 + w4 + w5 + w6 + w7, data=data)
+    #get estimates for each scenario and methods(AIPW1,2,3)
+    #AIPW1 <- AIPW1_est(data=weight_data$dat,w=weight_data$dat$w, y="y.obs")
+    #AIPW2 <- AIPW2_est(data=weight_data$dat,w=weight_data$dat$w, y="y.obs")
+    #AIPW_res <- data.frame(cbind(AIPW1['diff'],AIPW2['diff'])) %>% 
+    #  rename('AIPW1'=diff, 'AIPW2'=diff.1)
+    
+    #Same weights
+    AIPW1 <- AIPW1_est(data=data,w=weights[,1], y="y.obs")
+    AIPW2 <- AIPW2_est(data=data,w=weights[,1], y="y.obs")
+    AIPW_res <- data.frame(cbind(AIPW1['diff'],AIPW2['diff'])) %>% 
+      rename('AIPW1'=diff, 'AIPW2'=diff.1)
+
+    # AIPW_res
+    #  AIPW1     AIPW2
+    # 0.9515363 0.9527981
+    #AIPW_res2 same weight
+    #  AIPW1    AIPW2
+    #0.9579595 0.954474
+
+    # 3) (outcome Y) combine SATE =================================
+    delta_hat <- data.frame(cbind(IPSW_res, AIPW_res))
+    #
+    #
+    # ============================ For K outcome ===============================
+    #
+    # 1) (outcome K) IPSW ==================================
+    #1-1) IPSW (k.obs ~ S)
+    delta_hat_k <- unlist(lapply(design,function(z) {
+      tryCatch(svyglm(k.obs~T, data=data[data$S==1,], maxit=10000, design=z)$coef[2], error=function(e) NA)}))
+    IPSW_res_k <- data.frame(matrix(cbind(delta_hat_k), nrow=1))
+    colnames(IPSW_res_k) <- c('IPSW.LR','IPSW.SL',"trueps")
+    
+    #Added #####################################################################
+    IPSW_res_k.unw <- tryCatch(coef(glm(k.obs ~ T, data=data[data$S==1,]))[2], error=function(e) NA)
+    ############################################################################
+    
+    # 2) (outcome K) AIPW ==================================
+    OMest_k <- OM_est(p1mod = k.obs ~ w1 + w2 + w3 + w4 + w5 + w6 + w7,
+                      p0mod = k.obs ~ w1 + w2 + w3 + w4 + w5 + w6 + w7,
+                      data=data)
+    data$p1 <- OMest_k$p1
+    data$p0 <- OMest_k$p0
+    #get weights for each scenario
+    #weight_data <- generate_weights(Smod=S ~ w1 + w2 + w3 + w4 + w5 + w6 + w7, 
+    #                                Tmod=T ~ w1 + w2 + w3 + w4 + w5 + w6 + w7, data=data)
+    #get estimates for each scenario and methods(AIPW1,2,3)
+    #AIPW1 <- AIPW1_est(data=weight_data$dat,w=weight_data$dat$w, y="k.obs")
+    #AIPW2 <- AIPW2_est(data=weight_data$dat,w=weight_data$dat$w, y="k.obs")
+    #AIPW_res_k <- data.frame(cbind(AIPW1['diff'],AIPW2['diff'])) %>% 
+    #  rename('AIPW1'=diff, 'AIPW2'=diff.1)
+    
+    #Same weights
+    AIPW1 <- AIPW1_est(data=data,w=weights[,1], y="k.obs")
+    AIPW2 <- AIPW2_est(data=data,w=weights[,1], y="k.obs")
+    AIPW_res_k <- data.frame(cbind(AIPW1['diff'],AIPW2['diff'])) %>% 
+      rename('AIPW1'=diff, 'AIPW2'=diff.1)
+    #> AIPW_res_k
+    # AIPW1    AIPW2
+    #1 3.427036 2.983765
+    #> AIPW_res_k2
+    # AIPW1    AIPW2
+    #1 2.499716 3.324749
+    
+    # 3) (outcome K) combine SATE =================================
+    delta_hat_k <- data.frame(cbind(IPSW_res_k, AIPW_res_k))
+
+    #
+    # ============================ true TATE ===================================
+    #calculate true TATE
+    y0 <- a0 + a1*data$w1 + a2*data$w2 + a3*data$w3 + a4*data$w4 + a5*data$w5 + a6*data$w6 + a7*data$w7
+    y1 <- a0 + g1 + a1*data$w1 + a2*data$w2 + a3*data$w3 + a4*data$w4 + a5*data$w5 + a6*data$w6 + a7*data$w7 + 
+      a11*data$w1 + a13*data$w3 + a17*data$w7
+    k1 <- a0 + g1 + a1*data$w1 + a2*data$w2 + a3*data$w3 + a4*data$w4 + a5*data$w5 + a6*data$w6 + a7*data$w7 + 
+      a12*data$w2 + a15*data$w5 + a16*data$w6
+    delta_true <- mean(y1-y0)
+    delta_true_k <- mean(k1-y0)
+    delta_true_total <- cbind(delta_true, delta_true_k) 
+    #(2) delta_true(PATE(y))|delta_true_k(PATE(k))
+
+    
+    # ============================ bias,MSE ====================================
+    bias <- delta_hat - delta_true  
+    bias_k <- delta_hat_k - delta_true_k
+    bias_total <- cbind(bias, bias_k) 
+    #(10) IPSW.LR|IPSW.SL|trueps|AIPW1|AIPW2(y) IPSW.LR|IPSW.SL|trueps|AIPW1|AIPW2(k)
+    
+    #Added #####################################################################
+    delta_hat.unw <- cbind(IPSW_res.unw, IPSW_res_k.unw)
+    bias_total.unw <- data.frame(bias.unw = IPSW_res.unw - delta_true,
+                                 bias.unw_k = IPSW_res_k.unw - delta_true_k)
+    MSE.unw <- (IPSW_res.unw - delta_true)^2
+    MSE.unw_k <- (IPSW_res_k.unw - delta_true_k)^2
+    MSE.unw_total <- cbind(MSE.unw, MSE.unw_k)
+    ############################################################################
+
+    relativebias <- abs(delta_hat - delta_true) / abs(delta_true) 
+    relativebias_k <- abs(delta_hat_k - delta_true_k) / abs(delta_true_k) 
+    relativebias_total <- cbind(relativebias, relativebias_k) 
+    #(10) IPSW.LR|IPSW.SL|trueps|AIPW1|AIPW2(y) IPSW.LR|IPSW.SL|trueps|AIPW1|AIPW2(k)
+    
+    MSE <- (delta_hat - delta_true)^2 
+    MSE_k <- (delta_hat_k - delta_true_k)^2
+    MSE_total <- cbind(MSE, MSE_k) 
+    #(10) IPSW.LR|IPSW.SL|trueps|AIPW1|AIPW2(y) IPSW.LR|IPSW.SL|trueps|AIPW1|AIPW2(k)
+    
+    #all data frame should be converted to vector by unlist() not data.frame..?
+    delta_hat_total <- cbind(delta_hat, delta_hat_k)
+    delta_hat_total <- unlist(delta_hat_total)
+    
+    bias_total <- unlist(bias_total)
+    relativebias_total <- unlist(relativebias_total)
+    MSE_total <- unlist(MSE_total)
+    
+    #Added #####################################################################
+    bias_total.unw <- unlist(bias_total.unw)
+    ############################################################################
+    
+    output <- list(delta_true_total, delta_hat_total, 
+               bias_total, relativebias_total, MSE_total,
+               delta_hat.unw, bias_total.unw, MSE.unw_total)
+    names(output) <- c("delta_true","delta_hat",
+                   "bias","relativebias","MSE",
+                   "delta_hat.unw","bias.unw","MSE.unw")
+    
+    return(output)
+
+}
+
+same1.withem <- analysis.function.withem.same(data=data, size=10000)
+same1.withem
+```
+```{r Function to get RCT and estimate TATE2 (withoutemx1)}
+analysis.function.withoutemx1.same<-
+  function(data, size){
+    
+    #Smod = S~w2+w3+w4+w5+w6+w7
+    #Amod = T~w2+w3+w4+w5+w6+w7
+    #p1mod(or p0mod) = y.obs~w2+w3+w4+w5+w6+w7
+    
+    # ============================ selection model =============================
+    data$S<-rbinom(size,1,p=data$S_trueps)
+    #treatment assignment, random given selection
+    data$T<-vector(length=size)
+    data$T[data$S=="1"][sample(sum(data$S),sum(data$S)*.5)]<-1
+    data$T[data$S=="0"]<-NA
+    data$y.obs <- data$T*data$y1 + (1-data$T)*data$y0 + rnorm(size, 0, 0.2) 
+    data$k.obs <- data$T*data$k1 + (1-data$T)*data$y0 + rnorm(size, 0, 0.2) 
+    
+    
+    # ============================ Weights estimation ==========================
+    #Logistic regression
+    glm.model <- glm(S~w2+w3+w4+w5+w6+w7, family="binomial",data=data)
+    predsGLM<-as.vector(fitted(glm.model))
+
+    #SuperLearner
+    predsSL.Luedtke <- 
+      SuperLearner::SuperLearner(
+        Y=data$S,
+        X=data[,c(paste("w",2:7,sep=""))],
+        SL.library=c("SL.gam","SL.glm","SL.glm.interaction","SL.nnet","SL.rpart"),
+        family="binomial",
+        method="method.NNLS",
+        cvControl=list(V=5,stratifyCV=TRUE,shuffle=TRUE)
+        )$SL.predict
+
+    #get weights
+    preds <- cbind(predsGLM, predsSL.Luedtke, data$S_trueps)
+    colnames(preds)<-c("IPSW.LR","IPSW.SL","trueps")
+    preds<-as.matrix(preds)
+    weights<-apply(preds,2,function(x)ifelse(data$S==1,1/x,NA))
+    #weights[is.na(weights)] <- 0
+    
+    #
+    # ============================ For Y outcome ===============================
+    #
+    # 1) (outcome Y) IPSW ================================== 
+    #1-1) IPSW (y.obs ~ S)
+    design <- apply(weights,2,function(z) svydesign(ids=~1, weights=z[data$S==1], data=data[data$S==1,]))
+    delta_hat <- unlist(lapply(design,function(z) {
+      tryCatch(svyglm(y.obs~T, data=data[data$S==1,], maxit=10000, design=z)$coef[2], error=function(e) NA)}))
+    
+    IPSW_res <- data.frame(matrix(cbind(delta_hat), nrow=1))
+    colnames(IPSW_res) <- c('IPSW.LR','IPSW.SL','trueps')
+   
+    #Added #####################################################################
+    IPSW_res.unw <- tryCatch(coef(glm(y.obs ~ T, data=data[data$S==1,]))[2], error=function(e) NA)
+    ############################################################################
+    
+    # 2) (outcome Y) AIPW ==================================
+    OMest <- OM_est(p1mod=y.obs ~ w2 + w3 + w4 + w5 + w6 + w7,
+                    p0mod=y.obs ~ w2 + w3 + w4 + w5 + w6 + w7,
+                    data=data)
+    data$p1 <- OMest$p1
+    data$p0 <- OMest$p0
+    #get weights for each scenario
+    #weight_data <- generate_weights(Smod=S ~ w2 + w3 + w4 + w5 + w6 + w7, 
+    #                                Tmod=T ~ w2 + w3 + w4 + w5 + w6 + w7, data=data)
+    #get estimates for each scenario and methods(AIPW1,2,3)
+    AIPW1 <- AIPW1_est(data=data, w=weights[,1], y="y.obs")
+    AIPW2 <- AIPW2_est(data=data, w=weights[,1], y="y.obs")
+    AIPW_res <- data.frame(cbind(AIPW1['diff'],AIPW2['diff'])) %>% 
+      rename('AIPW1'=diff, 'AIPW2'=diff.1)
+    
+    # 3) (outcome Y) combine SATE =================================
+    delta_hat <- data.frame(cbind(IPSW_res, AIPW_res))
+    #
+    #
+    # ============================ For K outcome ===============================
+    #
+    # 1) (outcome K) IPSW ==================================
+    #1-1) IPSW (k.obs ~ S)
+    delta_hat_k <- unlist(lapply(design,function(z) {
+      tryCatch(svyglm(k.obs~T, data=data[data$S==1,], maxit=10000, design=z)$coef[2], error=function(e) NA)}))
+    
+    IPSW_res_k <- data.frame(matrix(cbind(delta_hat_k), nrow=1))
+    colnames(IPSW_res_k) <- c('IPSW.LR','IPSW.SL',"trueps")
+    
+    #Added #####################################################################
+    IPSW_res_k.unw <- tryCatch(coef(glm(k.obs ~ T, data=data[data$S==1,]))[2], error=function(e) NA)
+    ############################################################################
+    
+    # 2) (outcome K) AIPW ==================================
+    OMest_k <- OM_est(p1mod = k.obs ~ w2 + w3 + w4 + w5 + w6 + w7,
+                      p0mod = k.obs ~ w2 + w3 + w4 + w5 + w6 + w7,
+                      data=data)
+    data$p1 <- OMest_k$p1
+    data$p0 <- OMest_k$p0
+    #get weights for each scenario
+    #weight_data <- generate_weights(Smod= S ~ w2 + w3 + w4 + w5 + w6 + w7, 
+    #                                Tmod= T ~ w2 + w3 + w4 + w5 + w6 + w7, data=data)
+    #get estimates for each scenario and methods(AIPW1,2,3)
+    AIPW1 <- AIPW1_est(data=data, w=weights[,1], y="k.obs")
+    AIPW2 <- AIPW2_est(data=data, w=weights[,1], y="k.obs")
+    AIPW_res_k <- data.frame(cbind(AIPW1['diff'],AIPW2['diff'])) %>% 
+      rename('AIPW1'=diff, 'AIPW2'=diff.1)
+  
+    # 3) (outcome K) combine SATE =================================
+    delta_hat_k <- data.frame(cbind(IPSW_res_k, AIPW_res_k))
+
+    #
+    #
+    # ============================ true TATE ===================================
+    #calculate true TATE
+    y0 <- a0 + a1*data$w1 + a2*data$w2 + a3*data$w3 + a4*data$w4 + a5*data$w5 + a6*data$w6 + a7*data$w7
+    y1 <- a0 + g1 + a1*data$w1 + a2*data$w2 + a3*data$w3 + a4*data$w4 + a5*data$w5 + a6*data$w6 + a7*data$w7 +
+          a11*data$w1 + a13*data$w3 + a17*data$w7
+    k1 <- a0 + g1 + a1*data$w1 + a2*data$w2 + a3*data$w3 + a4*data$w4 + a5*data$w5 + a6*data$w6 + a7*data$w7 +
+          a12*data$w2 + a15*data$w5 + a16*data$w6
+    delta_true <- mean(y1-y0)
+    delta_true_k <- mean(k1-y0)
+    delta_true_total <- cbind(delta_true, delta_true_k)
+    
+    # ============================ bias,MSE ====================================
+    bias <- delta_hat - delta_true  #dataframe
+    bias_k <- delta_hat_k - delta_true_k
+    bias_total <- cbind(bias, bias_k)
+    
+    #Added #####################################################################
+    delta_hat.unw <- cbind(IPSW_res.unw, IPSW_res_k.unw)
+    bias_total.unw <- data.frame(bias.unw = IPSW_res.unw - delta_true,
+                                 bias.unw_k = IPSW_res_k.unw - delta_true_k)
+    MSE.unw <- (IPSW_res.unw - delta_true)^2
+    MSE.unw_k <- (IPSW_res_k.unw - delta_true_k)^2
+    MSE.unw_total <- cbind(MSE.unw, MSE.unw_k)
+    ############################################################################
+    
+    relativebias <- abs(delta_hat - delta_true) / abs(delta_true) #dataframe
+    relativebias_k <- abs(delta_hat_k - delta_true_k) / abs(delta_true_k) 
+    relativebias_total <- cbind(relativebias, relativebias_k)
+    
+    MSE <- (delta_hat - delta_true)^2 #dataframe
+    MSE_k <- (delta_hat_k - delta_true_k)^2
+    MSE_total <- cbind(MSE, MSE_k)
+    
+    #all data frame should be converted to vector by unlist()
+    delta_hat_total <- cbind(delta_hat, delta_hat_k)
+    delta_hat_total <- unlist(delta_hat_total)
+    bias_total <- unlist(bias_total)
+    relativebias_total <- unlist(relativebias_total)
+    MSE_total <- unlist(MSE_total)
+    
+    #Added #####################################################################
+    bias_total.unw <- unlist(bias_total.unw)
+    ############################################################################
+    
+    output <- list(delta_true_total, delta_hat_total, 
+               bias_total, relativebias_total, MSE_total,
+               delta_hat.unw, bias_total.unw, MSE.unw_total)
+    names(output) <- c("delta_true","delta_hat",
+                   "bias","relativebias","MSE",
+                   "delta_hat.unw","bias.unw","MSE.unw")
+    
+    return(output)
+}
+
+same1.withoutemx1 <- analysis.function.withoutemx1.same(data=data, size=10000)
+same1.withoutemx1
+```
+```{r Function to get RCT and estimate TATE3 (withoutem)}
+analysis.function.withoutem.same<-
+  function(data, size){
+    
+    #Smod = S~w2+w4+w5+w6
+    #Amod = T~w2+w4+w5+w6
+    #p1mod(or p0mod) = y.obs~w2+w4+w5+w6
+
+    # ============================ selection model ============================ 
+    data$S<-rbinom(size,1,p=data$S_trueps)
+    #treatment assignment, random given selection
+    data$T<-vector(length=size)
+    data$T[data$S=="1"][sample(sum(data$S),sum(data$S)*.5)]<-1
+    data$T[data$S=="0"]<-NA
+    data$y.obs <- data$T*data$y1 + (1-data$T)*data$y0 + rnorm(size, 0, 0.2) 
+    data$k.obs <- data$T*data$k1 + (1-data$T)*data$y0 + rnorm(size, 0, 0.2) 
+    
+    
+    # ============================ Weights estimation ==========================
+    #Logistic regression
+    glm.model <- glm(S ~ w2+w4+w5+w6, family="binomial", data=data)
+    predsGLM <-as.vector(fitted(glm.model))
+  
+
+    #SuperLearner
+    predsSL.Luedtke <- 
+      SuperLearner::SuperLearner(
+        Y=data$S,
+        X=data[,c('w2', 'w4', 'w5', 'w6')],
+        SL.library=c("SL.gam","SL.glm","SL.glm.interaction","SL.nnet","SL.rpart"),
+        family="binomial",
+        method="method.NNLS",
+        cvControl=list(V=5,stratifyCV=TRUE,shuffle=TRUE)
+        )$SL.predict
+
+    #get weights (new)
+    preds <- cbind(predsGLM, predsSL.Luedtke, data$S_trueps)
+    colnames(preds)<-c("IPSW.LR","IPSW.SL","trueps")
+    preds<-as.matrix(preds)
+    weights<-apply(preds,2,function(x)ifelse(data$S==1,1/x,NA))
+    #weights[is.na(weights)] <- 0
+    #
+    # ============================ For Y outcome ===============================
+    #
+    # 1) (outcome Y) IPSW ================================== 
+    #1-1) IPSW (y.obs ~ S)
+    design <- apply(weights,2,function(z) svydesign(ids=~1, weights=z[data$S==1], data=data[data$S==1,]))
+    delta_hat <- unlist(lapply(design,function(z) {
+      tryCatch(svyglm(y.obs~T, data=data[data$S==1,], maxit=10000, design=z)$coef[2], error=function(e) NA)}))
+    
+    IPSW_res <- data.frame(matrix(cbind(delta_hat), nrow=1))
+    colnames(IPSW_res) <- c('IPSW.LR','IPSW.SL','trueps')
+  
+    #Added #####################################################################
+    IPSW_res.unw <- tryCatch(coef(glm(y.obs ~ T, data=data[data$S==1,]))[2], error=function(e) NA)
+    ############################################################################
+    
+    # 2) (outcome Y) AIPW ================================== 
+    OMest <- OM_est(p1mod=y.obs ~ w2 + w4 + w5 + w6,
+                    p0mod=y.obs ~ w2 + w4 + w5 + w6,
+                    data=data)
+    data$p1 <- OMest$p1
+    data$p0 <- OMest$p0
+    #get weights for each scenario
+    #weight_data <- generate_weights(Smod=S ~ w2 + w4 + w5 + w6, 
+    #                                Tmod=T ~ w2 + w4 + w5 + w6, data=data)
+    #get estimates for each scenario and methods(AIPW1,2,3)
+    AIPW1 <- AIPW1_est(data=data, w=weights[,1], y="y.obs")
+    AIPW2 <- AIPW2_est(data=data, w=weights[,1], y="y.obs")
+    AIPW_res <- data.frame(cbind(AIPW1['diff'],AIPW2['diff'])) %>% 
+      rename('AIPW1'=diff, 'AIPW2'=diff.1)
+    
+    
+    # 3) (outcome Y) combine SATE =================================
+    delta_hat <- data.frame(cbind(IPSW_res, AIPW_res))
+
+    #
+    #
+    # ============================ For K outcome ===============================
+    #
+    # 1) (outcome K) IPSW ==================================
+    #1-1) IPSW (k.obs ~ S)
+    delta_hat_k <- unlist(lapply(design,function(z) {
+      tryCatch(svyglm(k.obs~T, data=data[data$S==1,], maxit=10000, design=z)$coef[2], error=function(e) NA)}))
+    IPSW_res_k <- data.frame(matrix(cbind(delta_hat_k), nrow=1))
+    colnames(IPSW_res_k) <- c('IPSW.LR','IPSW.SL',"trueps")
+    
+    #Added #####################################################################
+    IPSW_res_k.unw <- tryCatch(coef(glm(k.obs ~ T, data=data[data$S==1,]))[2], error=function(e) NA)
+    ############################################################################
+    
+    # 2) (outcome K) AIPW ==================================
+    OMest_k <- OM_est(p1mod=k.obs ~ w2 + w4 + w5 + w6,
+                      p0mod=k.obs ~ w2 + w4 + w5 + w6,
+                      data=data)
+    data$p1 <- OMest_k$p1
+    data$p0 <- OMest_k$p0
+    #get weights for each scenario
+    #weight_data <- generate_weights(Smod=S ~ w2 + w4 + w5 + w6, 
+    #                                Tmod=T ~ w2 + w4 + w5 + w6, data=data)
+    #get estimates for each scenario and methods(AIPW1,2,3)
+    AIPW1 <- AIPW1_est(data=data, w=weights[,1], y="k.obs")
+    AIPW2 <- AIPW2_est(data=data, w=weights[,1], y="k.obs")
+    AIPW_res_k <- data.frame(cbind(AIPW1['diff'],AIPW2['diff'])) %>% 
+      rename('AIPW1'=diff, 'AIPW2'=diff.1)
+    
+    
+    # 3) (outcome K) combine SATE =================================
+    delta_hat_k <- data.frame(cbind(IPSW_res_k, AIPW_res_k))
+
+    #
+    #
+    # ============================ true TATE ===================================
+    #calculate true TATE
+    y0 <- a0 + a1*data$w1 + a2*data$w2 + a3*data$w3 + a4*data$w4 + a5*data$w5 + a6*data$w6 + a7*data$w7
+    y1 <- a0 + g1 + a1*data$w1 + a2*data$w2 + a3*data$w3 + a4*data$w4 + a5*data$w5 + a6*data$w6 + a7*data$w7 +
+          a11*data$w1 + a13*data$w3 + a17*data$w7
+    k1 <- a0 + g1 + a1*data$w1 + a2*data$w2 + a3*data$w3 + a4*data$w4 + a5*data$w5 + a6*data$w6 + a7*data$w7 +
+          a12*data$w2 + a15*data$w5 + a16*data$w6
+    delta_true <- mean(y1-y0)
+    delta_true_k <- mean(k1-y0)
+    delta_true_total <- cbind(delta_true, delta_true_k)
+    
+    
+    # ============================ bias,MSE ====================================
+    bias <- delta_hat - delta_true  #dataframe
+    bias_k <- delta_hat_k - delta_true_k
+    bias_total <- cbind(bias, bias_k)
+    
+    #Added #####################################################################
+    delta_hat.unw <- cbind(IPSW_res.unw, IPSW_res_k.unw)
+    bias_total.unw <- data.frame(bias.unw = IPSW_res.unw - delta_true,
+                                 bias.unw_k = IPSW_res_k.unw - delta_true_k)
+    MSE.unw <- (IPSW_res.unw - delta_true)^2
+    MSE.unw_k <- (IPSW_res_k.unw - delta_true_k)^2
+    MSE.unw_total <- cbind(MSE.unw, MSE.unw_k)
+    ############################################################################
+    
+    relativebias <- abs(delta_hat - delta_true) / abs(delta_true) #dataframe
+    relativebias_k <- abs(delta_hat_k - delta_true_k) / abs(delta_true_k) 
+    relativebias_total <- cbind(relativebias, relativebias_k)
+    
+    MSE <- (delta_hat - delta_true)^2 #dataframe
+    MSE_k <- (delta_hat_k - delta_true_k)^2
+    MSE_total <- cbind(MSE, MSE_k)
+    
+    #all data frame should be converted to vector by unlist()
+    delta_hat_total <- cbind(delta_hat, delta_hat_k)
+    delta_hat_total <- unlist(delta_hat_total)
+    bias_total <- unlist(bias_total)
+    relativebias_total <- unlist(relativebias_total)
+    MSE_total <- unlist(MSE_total)
+ 
+    #Added #####################################################################
+    bias_total.unw <- unlist(bias_total.unw)
+    ############################################################################
+    
+    output <- list(delta_true_total, delta_hat_total, 
+               bias_total, relativebias_total, MSE_total,
+               delta_hat.unw, bias_total.unw, MSE.unw_total)
+    names(output) <- c("delta_true","delta_hat",
+                   "bias","relativebias","MSE",
+                   "delta_hat.unw","bias.unw","MSE.unw")
+    
+    return(output)
+}
+
+same1.withoutem <- analysis.function.withoutem.same(data=data, size=10000)
+same1.withoutem
+```
+```{r comparison (LR)}
+data.frame(same1.withem$bias.unw)
+data.frame(same1.withoutemx1$bias.unw)
+data.frame(same1.withoutem$bias.unw)
+```
+
+
+# 1-2) updated version with the same weights2 (SR)
+```{r Function2 to get RCT and estimate TATE (withem)}
+#boot=10000
+analysis.function.withem.same2<-
+  function(data, size){
+    
+    #Smod = S~w1+w2+w3+w4+w5+w6+w7
+    #Amod = T~w1+w2+w3+w4+w5+w6+w7
+    #p1mod(or p0mod) = y.obs~w1+w2+w3+w4+w5+w6+w7
+    
+    # ============================ selection model ============================= 
+    data$S<-rbinom(size,1,p=data$S_trueps)
+    #treatment assignment, random given selection
+    data$T<-vector(length=size)
+    data$T[data$S=="1"][sample(sum(data$S),sum(data$S)*.5)]<-1
+    data$T[data$S=="0"]<-NA
+    data$y.obs <- data$T*data$y1 + (1-data$T)*data$y0 + rnorm(size, 0, 0.2) 
+    data$k.obs <- data$T*data$k1 + (1-data$T)*data$y0 + rnorm(size, 0, 0.2) 
+    
+    # ============================ Weights estimation ==========================
+    #Logistic regression
+    glm.model <- glm(S~w1+w2+w3+w4+w5+w6+w7, family="binomial",data=data)
+    predsGLM<-as.vector(fitted(glm.model))
+
+    #SuperLearner
+    predsSL.Luedtke <- 
+      SuperLearner::SuperLearner(
+        Y=data$S,
+        X=data[,c(paste("w",1:7,sep=""))],
+        SL.library=c("SL.gam","SL.glm","SL.glm.interaction","SL.nnet","SL.rpart"),
+        family="binomial",
+        method="method.NNLS",
+        cvControl=list(V=5,stratifyCV=TRUE,shuffle=TRUE)
+        )$SL.predict
+
+    #get weights
+    preds <- cbind(predsGLM, predsSL.Luedtke, data$S_trueps)
+    colnames(preds)<-c("IPSW.LR","IPSW.SL","trueps")
+    preds<-as.matrix(preds)
+    weights<-apply(preds,2,function(x)ifelse(data$S==1,1/x,NA))
+    #weights[is.na(weights)] <- 0
+    #
+    # ============================ For Y outcome ===============================
+    #
+    # 1) (outcome Y) IPSW ================================== 
+    #1-1) IPSW (y.obs ~ S)
+    design <- apply(weights,2,function(z) svydesign(ids=~1, weights=z[data$S==1], data=data[data$S==1,]))
+    delta_hat <- unlist(lapply(design,function(z) {
+      tryCatch(svyglm(y.obs~T, data=data[data$S==1,], maxit=10000, design=z)$coef[2], error=function(e) NA)}))
+    IPSW_res <- data.frame(matrix(cbind(delta_hat), nrow=1))
+    colnames(IPSW_res) <- c('IPSW.LR','IPSW.SL','trueps') 
+    
+    #Added #####################################################################
+    IPSW_res.unw <- tryCatch(coef(glm(y.obs ~ T, data=data[data$S==1,]))[2], error=function(e) NA)
+    ############################################################################
+    
+    # 2) (outcome Y) AIPW ==================================
+    OMest <- OM_est(p1mod = y.obs ~ w1 + w2 + w3 + w4 + w5 + w6 + w7,
+                    p0mod = y.obs ~ w1 + w2 + w3 + w4 + w5 + w6 + w7,
+                    data=data)
+    data$p1 <- OMest$p1
+    data$p0 <- OMest$p0
+    #get weights for each scenario
+    weight_data <- generate_weights(Smod=S ~ w1 + w2 + w3 + w4 + w5 + w6 + w7, 
+                                    Tmod=T ~ w1 + w2 + w3 + w4 + w5 + w6 + w7, data=data)
+    #get estimates for each scenario and methods(AIPW1,2,3)
+    #AIPW1 <- AIPW1_est(data=weight_data$dat,w=weight_data$dat$w, y="y.obs")
+    #AIPW2 <- AIPW2_est(data=weight_data$dat,w=weight_data$dat$w, y="y.obs")
+    #AIPW_res <- data.frame(cbind(AIPW1['diff'],AIPW2['diff'])) %>% 
+    #  rename('AIPW1'=diff, 'AIPW2'=diff.1)
+    
+    #Same weights
+    AIPW1 <- AIPW1_est(data=data,w=weights[,2], y="y.obs")
+    AIPW2 <- AIPW2_est(data=data,w=weights[,2], y="y.obs")
+    AIPW_res <- data.frame(cbind(AIPW1['diff'],AIPW2['diff'])) %>% 
+      rename('AIPW1'=diff, 'AIPW2'=diff.1)
+
+    # AIPW_res
+    #  AIPW1     AIPW2
+    # 0.9515363 0.9527981
+    #AIPW_res2 same weight
+    #  AIPW1    AIPW2
+    #0.9579595 0.954474
+
+    # 3) (outcome Y) combine SATE =================================
+    delta_hat <- data.frame(cbind(IPSW_res, AIPW_res))
+    #
+    #
+    # ============================ For K outcome ===============================
+    #
+    # 1) (outcome K) IPSW ==================================
+    #1-1) IPSW (k.obs ~ S)
+    delta_hat_k <- unlist(lapply(design,function(z) {
+      tryCatch(svyglm(k.obs~T, data=data[data$S==1,], maxit=10000, design=z)$coef[2], error=function(e) NA)}))
+    IPSW_res_k <- data.frame(matrix(cbind(delta_hat_k), nrow=1))
+    colnames(IPSW_res_k) <- c('IPSW.LR','IPSW.SL',"trueps") 
+    
+    #Added #####################################################################
+    IPSW_res_k.unw <- tryCatch(coef(glm(k.obs ~ T, data=data[data$S==1,]))[2], error=function(e) NA)
+    ############################################################################
+    
+    # 2) (outcome K) AIPW ==================================
+    OMest_k <- OM_est(p1mod = k.obs ~ w1 + w2 + w3 + w4 + w5 + w6 + w7,
+                      p0mod = k.obs ~ w1 + w2 + w3 + w4 + w5 + w6 + w7,
+                      data=data)
+    data$p1 <- OMest_k$p1
+    data$p0 <- OMest_k$p0
+    #get weights for each scenario
+    weight_data <- generate_weights(Smod=S ~ w1 + w2 + w3 + w4 + w5 + w6 + w7, 
+                                    Tmod=T ~ w1 + w2 + w3 + w4 + w5 + w6 + w7, data=data)
+    #get estimates for each scenario and methods(AIPW1,2,3)
+    #AIPW1 <- AIPW1_est(data=weight_data$dat,w=weight_data$dat$w, y="k.obs")
+    #AIPW2 <- AIPW2_est(data=weight_data$dat,w=weight_data$dat$w, y="k.obs")
+    #AIPW_res_k <- data.frame(cbind(AIPW1['diff'],AIPW2['diff'])) %>% 
+    #  rename('AIPW1'=diff, 'AIPW2'=diff.1)
+    
+    #Same weights
+    AIPW1 <- AIPW1_est(data=data,w=weights[,2], y="k.obs")
+    AIPW2 <- AIPW2_est(data=data,w=weights[,2], y="k.obs")
+    AIPW_res_k <- data.frame(cbind(AIPW1['diff'],AIPW2['diff'])) %>% 
+      rename('AIPW1'=diff, 'AIPW2'=diff.1)
+    #> AIPW_res_k
+    # AIPW1    AIPW2
+    #1 3.427036 2.983765
+    #> AIPW_res_k2
+    # AIPW1    AIPW2
+    #1 2.499716 3.324749
+    
+    # 3) (outcome K) combine SATE =================================
+    delta_hat_k <- data.frame(cbind(IPSW_res_k, AIPW_res_k))
+    #
+    #
+    # ============================ true TATE ===================================
+    #calculate true TATE
+    y0 <- a0 + a1*data$w1 + a2*data$w2 + a3*data$w3 + a4*data$w4 + a5*data$w5 + a6*data$w6 + a7*data$w7
+    y1 <- a0 + g1 + a1*data$w1 + a2*data$w2 + a3*data$w3 + a4*data$w4 + a5*data$w5 + a6*data$w6 + a7*data$w7 + a11*data$w1 + a13*data$w3 + a17*data$w7
+    k1 <- a0 + g1 + a1*data$w1 + a2*data$w2 + a3*data$w3 + a4*data$w4 + a5*data$w5 + a6*data$w6 + a7*data$w7 + a12*data$w2 + a15*data$w5 + a16*data$w6
+    delta_true <- mean(y1-y0)
+    delta_true_k <- mean(k1-y0)
+    delta_true_total <- cbind(delta_true, delta_true_k)
+    
+    # ============================ bias,MSE ====================================
+    bias <- delta_hat - delta_true  #dataframe
+    bias_k <- delta_hat_k - delta_true_k
+    bias_total <- cbind(bias, bias_k)
+    
+    #Added #####################################################################
+    delta_hat.unw <- cbind(IPSW_res.unw, IPSW_res_k.unw)
+    bias_total.unw <- data.frame(bias.unw = IPSW_res.unw - delta_true,
+                                   bias.unw_k = IPSW_res_k.unw - delta_true_k)
+    MSE.unw <- (IPSW_res.unw - delta_true)^2
+    MSE.unw_k <- (IPSW_res_k.unw - delta_true_k)^2
+    MSE.unw_total <- cbind(MSE.unw, MSE.unw_k)
+    ############################################################################
+    
+    relativebias <- abs(delta_hat - delta_true) / abs(delta_true) #dataframe
+    relativebias_k <- abs(delta_hat_k - delta_true_k) / abs(delta_true_k) 
+    relativebias_total <- cbind(relativebias, relativebias_k)
+    
+    MSE <- (delta_hat - delta_true)^2 #dataframe
+    MSE_k <- (delta_hat_k - delta_true_k)^2
+    MSE_total <- cbind(MSE, MSE_k)
+    
+    #all data frame should be converted to vector by unlist()
+    delta_hat_total <- cbind(delta_hat, delta_hat_k)
+    delta_hat_total <- unlist(delta_hat_total)
+    bias_total <- unlist(bias_total)
+    relativebias_total <- unlist(relativebias_total)
+    MSE_total <- unlist(MSE_total)
+    
+    #Added #####################################################################
+    bias_total.unw <- unlist(bias_total.unw)
+    ############################################################################
+    
+    output <- list(delta_true_total, delta_hat_total, 
+               bias_total, relativebias_total, MSE_total,
+               delta_hat.unw, bias_total.unw, MSE.unw_total)
+    names(output) <- c("delta_true","delta_hat",
+                   "bias","relativebias","MSE",
+                   "delta_hat.unw","bias.unw","MSE.unw")
+    
+    return(output)
+
+}
+
+same2.withem <- analysis.function.withem.same2(data=data, size=10000)
+same2.withem
+```
+```{r Function2 to get RCT and estimate TATE2 (withoutemx1)}
+analysis.function.withoutemx1.same2<-
+  function(data, size){
+    
+    #Smod = S~w2+w3+w4+w5+w6+w7
+    #Amod = T~w2+w3+w4+w5+w6+w7
+    #p1mod(or p0mod) = y.obs~w2+w3+w4+w5+w6+w7
+    
+    # ============================ selection model ============================= 
+    data$S<-rbinom(size,1,p=data$S_trueps)
+    #treatment assignment, random given selection
+    data$T<-vector(length=size)
+    data$T[data$S=="1"][sample(sum(data$S),sum(data$S)*.5)]<-1
+    data$T[data$S=="0"]<-NA
+    data$y.obs <- data$T*data$y1 + (1-data$T)*data$y0 + rnorm(size, 0, 0.2) 
+    data$k.obs <- data$T*data$k1 + (1-data$T)*data$y0 + rnorm(size, 0, 0.2) 
+    
+    #summary for differences (ASMD of covariates)
+    summary.diff <- apply(data[c("w1","w2","w3","w4","w5","w6","w7","S_trueps")],2,
+                          function(x) abs(mean(x[data$S==1])-mean(x))/sd(x))
+    
+    # ============================ Weights estimation ==========================
+    #Logistic regression
+    glm.model <- glm(S~w2+w3+w4+w5+w6+w7, family="binomial",data=data)
+    predsGLM<-as.vector(fitted(glm.model))
+
+    #SuperLearner
+    predsSL.Luedtke <- 
+      SuperLearner::SuperLearner(
+        Y=data$S,
+        X=data[,c(paste("w",2:7,sep=""))],
+        SL.library=c("SL.gam","SL.glm","SL.glm.interaction","SL.nnet","SL.rpart"),
+        family="binomial",
+        method="method.NNLS",
+        cvControl=list(V=5,stratifyCV=TRUE,shuffle=TRUE)
+        )$SL.predict
+
+    #get weights
+    preds <- cbind(predsGLM, predsSL.Luedtke, data$S_trueps)
+    colnames(preds)<-c("IPSW.LR","IPSW.SL","trueps")
+    preds<-as.matrix(preds)
+    weights<-apply(preds,2,function(x)ifelse(data$S==1,1/x,NA))
+    #weights[is.na(weights)] <- 0
+    
+    #
+    # ============================ For Y outcome ===============================
+    #
+    # 1) (outcome Y) IPSW ==================================
+    #1-1) IPSW (y.obs ~ S)
+    design <- apply(weights,2,function(z) svydesign(ids=~1, weights=z[data$S==1], data=data[data$S==1,]))
+    delta_hat <- unlist(lapply(design,function(z) {
+      tryCatch(svyglm(y.obs~T, data=data[data$S==1,], maxit=10000, design=z)$coef[2], error=function(e) NA)}))
+    
+    IPSW_res <- data.frame(matrix(cbind(delta_hat), nrow=1))
+    colnames(IPSW_res) <- c('IPSW.LR','IPSW.SL','trueps') 
+   
+    #Added #####################################################################
+    IPSW_res.unw <- tryCatch(coef(glm(y.obs ~ T, data=data[data$S==1,]))[2], error=function(e) NA)
+    ############################################################################
+    
+    # 2) (outcome Y) AIPW ==================================
+    OMest <- OM_est(p1mod=y.obs ~ w2 + w3 + w4 + w5 + w6 + w7,
+                    p0mod=y.obs ~ w2 + w3 + w4 + w5 + w6 + w7,
+                    data=data)
+    data$p1 <- OMest$p1
+    data$p0 <- OMest$p0
+    #get weights for each scenario
+    weight_data <- generate_weights(Smod=S ~ w2 + w3 + w4 + w5 + w6 + w7, 
+                                    Tmod=T ~ w2 + w3 + w4 + w5 + w6 + w7, data=data)
+    #get estimates for each scenario and methods(AIPW1,2,3)
+    AIPW1 <- AIPW1_est(data=data, w=weights[,2], y="y.obs")
+    AIPW2 <- AIPW2_est(data=data, w=weights[,2], y="y.obs")
+    AIPW_res <- data.frame(cbind(AIPW1['diff'],AIPW2['diff'])) %>% 
+      rename('AIPW1'=diff, 'AIPW2'=diff.1)
+    
+    # 3) (outcome Y) combine SATE =================================
+    delta_hat <- data.frame(cbind(IPSW_res, AIPW_res))
+    #
+    #
+    # ============================ For K outcome ===============================
+    #
+    # 1) (outcome K) IPSW ==================================
+    #1-1) IPSW (k.obs ~ S)
+    delta_hat_k <- unlist(lapply(design,function(z) {
+      tryCatch(svyglm(k.obs~T, data=data[data$S==1,], maxit=10000, design=z)$coef[2], error=function(e) NA)}))
+    
+    IPSW_res_k <- data.frame(matrix(cbind(delta_hat_k), nrow=1))
+    colnames(IPSW_res_k) <- c('IPSW.LR','IPSW.SL',"trueps")
+    
+    #Added #####################################################################
+    IPSW_res_k.unw <- tryCatch(coef(glm(k.obs ~ T, data=data[data$S==1,]))[2], error=function(e) NA)
+    ############################################################################
+    
+    # 2) (outcome K) AIPW ==================================
+    OMest_k <- OM_est(p1mod = k.obs ~ w2 + w3 + w4 + w5 + w6 + w7,
+                      p0mod = k.obs ~ w2 + w3 + w4 + w5 + w6 + w7,
+                      data=data)
+    data$p1 <- OMest_k$p1
+    data$p0 <- OMest_k$p0
+    #get weights for each scenario
+    weight_data <- generate_weights(Smod= S ~ w2 + w3 + w4 + w5 + w6 + w7, 
+                                    Tmod= T ~ w2 + w3 + w4 + w5 + w6 + w7, data=data)
+    #get estimates for each scenario and methods(AIPW1,2,3)
+    AIPW1 <- AIPW1_est(data=data, w=weights[,2], y="k.obs")
+    AIPW2 <- AIPW2_est(data=data, w=weights[,2], y="k.obs")
+    AIPW_res_k <- data.frame(cbind(AIPW1['diff'],AIPW2['diff'])) %>% 
+      rename('AIPW1'=diff, 'AIPW2'=diff.1)
+  
+    # 3) (outcome K) combine SATE =================================
+    delta_hat_k <- data.frame(cbind(IPSW_res_k, AIPW_res_k))
+
+    #
+    #
+    # ============================ true TATE ===================================
+    #calculate true TATE
+    y0 <- a0 + a1*data$w1 + a2*data$w2 + a3*data$w3 + a4*data$w4 + a5*data$w5 + a6*data$w6 + a7*data$w7
+    y1 <- a0 + g1 + a1*data$w1 + a2*data$w2 + a3*data$w3 + a4*data$w4 + a5*data$w5 + a6*data$w6 + a7*data$w7 +
+          a11*data$w1 + a13*data$w3 + a17*data$w7
+    k1 <- a0 + g1 + a1*data$w1 + a2*data$w2 + a3*data$w3 + a4*data$w4 + a5*data$w5 + a6*data$w6 + a7*data$w7 +
+          a12*data$w2 + a15*data$w5 + a16*data$w6
+    delta_true <- mean(y1-y0)
+    delta_true_k <- mean(k1-y0)
+    delta_true_total <- cbind(delta_true, delta_true_k)
+    
+    # ============================ bias,MSE ====================================
+    bias <- delta_hat - delta_true  #dataframe
+    bias_k <- delta_hat_k - delta_true_k
+    bias_total <- cbind(bias, bias_k)
+    
+    #Added #####################################################################
+    delta_hat.unw <- cbind(IPSW_res.unw, IPSW_res_k.unw)
+    bias_total.unw <- data.frame(bias.unw = IPSW_res.unw - delta_true,
+                                   bias.unw_k = IPSW_res_k.unw - delta_true_k)
+    MSE.unw <- (IPSW_res.unw - delta_true)^2
+    MSE.unw_k <- (IPSW_res_k.unw - delta_true_k)^2
+    MSE.unw_total <- cbind(MSE.unw, MSE.unw_k)
+    ############################################################################
+    
+    relativebias <- abs(delta_hat - delta_true) / abs(delta_true) #dataframe
+    relativebias_k <- abs(delta_hat_k - delta_true_k) / abs(delta_true_k) 
+    relativebias_total <- cbind(relativebias, relativebias_k)
+    
+    MSE <- (delta_hat - delta_true)^2 #dataframe
+    MSE_k <- (delta_hat_k - delta_true_k)^2
+    MSE_total <- cbind(MSE, MSE_k)
+    
+    #all data frame should be converted to vector by unlist()
+    delta_hat_total <- cbind(delta_hat, delta_hat_k)
+    delta_hat_total <- unlist(delta_hat_total)
+    bias_total <- unlist(bias_total)
+    relativebias_total <- unlist(relativebias_total)
+    MSE_total <- unlist(MSE_total)
+
+    #Added #####################################################################
+    bias_total.unw <- unlist(bias_total.unw)
+    ############################################################################
+    
+    output <- list(delta_true_total, delta_hat_total, 
+               bias_total, relativebias_total, MSE_total,
+               delta_hat.unw, bias_total.unw, MSE.unw_total)
+    
+    names(output) <- c("delta_true","delta_hat",
+                   "bias","relativebias","MSE",
+                   "delta_hat.unw","bias.unw","MSE.unw")
+    
+    return(output)
+}
+
+same2.withoutemx1 <- analysis.function.withoutemx1.same2(data=data, size=10000)
+same2.withoutemx1
+```
+```{r Function2 to get RCT and estimate TATE3 (withoutem)}
+analysis.function.withoutem.same2<-
+  function(data, size){
+    
+    #Smod = S~w2+w4+w5+w6
+    #Amod = T~w2+w4+w5+w6
+    #p1mod(or p0mod) = y.obs~w2+w4+w5+w6
+    
+    # ============================ selection model =============================
+    data$S<-rbinom(size,1,p=data$S_trueps)
+    #treatment assignment, random given selection
+    data$T<-vector(length=size)
+    data$T[data$S=="1"][sample(sum(data$S),sum(data$S)*.5)]<-1
+    data$T[data$S=="0"]<-NA
+    data$y.obs <- data$T*data$y1 + (1-data$T)*data$y0 + rnorm(size, 0, 0.2) 
+    data$k.obs <- data$T*data$k1 + (1-data$T)*data$y0 + rnorm(size, 0, 0.2) 
+    
+    #summary for differences (ASMD of covariates)
+    summary.diff <- apply(data[c("w1","w2","w3","w4","w5","w6","w7","S_trueps")],2,
+                          function(x) abs(mean(x[data$S==1])-mean(x))/sd(x))
+    
+    # ============================ Weights estimation ==========================
+    #Logistic regression
+    glm.model <- glm(S~w2+w4+w5+w6, family="binomial",data=data)
+    predsGLM<-as.vector(fitted(glm.model))
+
+    #SuperLearner
+    predsSL.Luedtke <- 
+      SuperLearner::SuperLearner(
+        Y=data$S,
+        X=data[,c('w2', 'w4', 'w5', 'w6')],
+        SL.library=c("SL.gam","SL.glm","SL.glm.interaction","SL.nnet","SL.rpart"),
+        family="binomial",
+        method="method.NNLS",
+        cvControl=list(V=5,stratifyCV=TRUE,shuffle=TRUE)
+        )$SL.predict
+
+    #get weights
+    preds <- cbind(predsGLM, predsSL.Luedtke, data$S_trueps)
+    colnames(preds)<-c("IPSW.LR","IPSW.SL","trueps")
+    preds<-as.matrix(preds)
+    weights<-apply(preds,2,function(x)ifelse(data$S==1,1/x,NA))
+    #weights[is.na(weights)] <- 0
+    #
+    # ============================ For Y outcome ===============================
+    #
+    # 1) (outcome Y) IPSW ==================================
+    #1-1) IPSW (y.obs ~ S)
+    design <- apply(weights,2,function(z) svydesign(ids=~1, weights=z[data$S==1], data=data[data$S==1,]))
+    delta_hat <- unlist(lapply(design,function(z) {
+      tryCatch(svyglm(y.obs~T, data=data[data$S==1,], maxit=10000, design=z)$coef[2], error=function(e) NA)}))
+    IPSW_res <- data.frame(matrix(cbind(delta_hat), nrow=1))
+    colnames(IPSW_res) <- c('IPSW.LR','IPSW.SL','trueps')
+  
+    #Added #####################################################################
+    IPSW_res.unw <- tryCatch(coef(glm(y.obs ~ T, data=data[data$S==1,]))[2], error=function(e) NA)
+    ############################################################################
+    
+    # 2) (outcome Y) AIPW ==================================
+    OMest <- OM_est(p1mod=y.obs ~ w2 + w4 + w5 + w6,
+                    p0mod=y.obs ~ w2 + w4 + w5 + w6,
+                    data=data)
+    data$p1 <- OMest$p1
+    data$p0 <- OMest$p0
+    #get weights for each scenario
+    weight_data <- generate_weights(Smod=S ~ w2 + w4 + w5 + w6, 
+                                    Tmod=T ~ w2 + w4 + w5 + w6, data=data)
+    #get estimates for each scenario and methods(AIPW1,2,3)
+    AIPW1 <- AIPW1_est(data=data, w=weights[,2], y="y.obs")
+    AIPW2 <- AIPW2_est(data=data, w=weights[,2], y="y.obs")
+    AIPW_res <- data.frame(cbind(AIPW1['diff'],AIPW2['diff'])) %>% 
+      rename('AIPW1'=diff, 'AIPW2'=diff.1)
+    
+    
+    # 3) (outcome Y) combine SATE =================================
+    delta_hat <- data.frame(cbind(IPSW_res, AIPW_res))
+
+    #
+    #
+    # ============================ For K outcome ===============================
+    #
+    # 1) (outcome K) IPSW ==================================
+    #1-1) IPSW (k.obs ~ S)
+    delta_hat_k <- unlist(lapply(design,function(z) {
+      tryCatch(svyglm(k.obs~T, data=data[data$S==1,], maxit=10000, design=z)$coef[2], error=function(e) NA)}))
+    IPSW_res_k <- data.frame(matrix(cbind(delta_hat_k), nrow=1))
+    colnames(IPSW_res_k) <- c('IPSW.LR','IPSW.SL',"trueps")
+   
+    #Added #####################################################################
+    IPSW_res_k.unw <- tryCatch(coef(glm(k.obs ~ T, data=data[data$S==1,]))[2], error=function(e) NA)
+    ############################################################################
+    
+    # 2) (outcome K) AIPW ==================================
+    OMest_k <- OM_est(p1mod=k.obs ~ w2 + w4 + w5 + w6,
+                      p0mod=k.obs ~ w2 + w4 + w5 + w6,
+                      data=data)
+    data$p1 <- OMest_k$p1
+    data$p0 <- OMest_k$p0
+    #get weights for each scenario
+    weight_data <- generate_weights(Smod=S ~ w2 + w4 + w5 + w6, 
+                                    Tmod=T ~ w2 + w4 + w5 + w6, data=data)
+    #get estimates for each scenario and methods(AIPW1,2,3)
+    AIPW1 <- AIPW1_est(data=data, w=weights[,2], y="k.obs")
+    AIPW2 <- AIPW2_est(data=data, w=weights[,2], y="k.obs")
+    AIPW_res_k <- data.frame(cbind(AIPW1['diff'],AIPW2['diff'])) %>% 
+      rename('AIPW1'=diff, 'AIPW2'=diff.1)
+    
+    
+    # 3) (outcome K) combine SATE =================================
+    delta_hat_k <- data.frame(cbind(IPSW_res_k, AIPW_res_k))
+
+    #
+    #
+    # ============================ true TATE ===================================
+    #calculate true TATE
+    y0 <- a0 + a1*data$w1 + a2*data$w2 + a3*data$w3 + a4*data$w4 + a5*data$w5 + a6*data$w6 + a7*data$w7
+    y1 <- a0 + g1 + a1*data$w1 + a2*data$w2 + a3*data$w3 + a4*data$w4 + a5*data$w5 + a6*data$w6 + a7*data$w7 +
+          a11*data$w1 + a13*data$w3 + a17*data$w7
+    k1 <- a0 + g1 + a1*data$w1 + a2*data$w2 + a3*data$w3 + a4*data$w4 + a5*data$w5 + a6*data$w6 + a7*data$w7 +
+          a12*data$w2 + a15*data$w5 + a16*data$w6
+    delta_true <- mean(y1-y0)
+    delta_true_k <- mean(k1-y0)
+    delta_true_total <- cbind(delta_true, delta_true_k)
+    
+    
+    # ============================ bias,MSE ====================================
+    bias <- delta_hat - delta_true  #dataframe
+    bias_k <- delta_hat_k - delta_true_k
+    bias_total <- cbind(bias, bias_k)
+    
+    #Added #####################################################################
+    delta_hat.unw <- cbind(IPSW_res.unw, IPSW_res_k.unw)
+    bias_total.unw <- data.frame(bias.unw = IPSW_res.unw - delta_true,
+                                   bias.unw_k = IPSW_res_k.unw - delta_true_k)
+    MSE.unw <- (IPSW_res.unw - delta_true)^2
+    MSE.unw_k <- (IPSW_res_k.unw - delta_true_k)^2
+    MSE.unw_total <- cbind(MSE.unw, MSE.unw_k)
+    ############################################################################
+    
+    relativebias <- abs(delta_hat - delta_true) / abs(delta_true) #dataframe
+    relativebias_k <- abs(delta_hat_k - delta_true_k) / abs(delta_true_k) 
+    relativebias_total <- cbind(relativebias, relativebias_k)
+    
+    MSE <- (delta_hat - delta_true)^2 #dataframe
+    MSE_k <- (delta_hat_k - delta_true_k)^2
+    MSE_total <- cbind(MSE, MSE_k)
+    
+    #all data frame should be converted to vector by unlist()
+    delta_hat_total <- cbind(delta_hat, delta_hat_k)
+    delta_hat_total <- unlist(delta_hat_total)
+    bias_total <- unlist(bias_total)
+    relativebias_total <- unlist(relativebias_total)
+    MSE_total <- unlist(MSE_total)
+ 
+    #Added #####################################################################
+    bias_total.unw <- unlist(bias_total.unw)
+    ############################################################################
+    
+    output <- list(delta_true_total, delta_hat_total, 
+               bias_total, relativebias_total, MSE_total,
+               delta_hat.unw, bias_total.unw, MSE.unw_total)
+    names(output) <- c("delta_true","delta_hat",
+                   "bias","relativebias","MSE",
+                   "delta_hat.unw","bias.unw","MSE.unw")
+    
+    return(output)
+}
+
+same2.withoutem <- analysis.function.withoutem.same2(data=data, size=10000)
+same2.withoutem 
+```
+```{r comparison (SL)}
+data.frame(same2.withem$bias.unw)
+data.frame(same2.withoutemx1$bias.unw)
+data.frame(same2.withoutem$bias.unw)
+```
+
+
+# 2. run iterations for both same and different weights cases
+```{r Function for iterations different weights}
+resultswrap<-function(size,prop,scenario,iter,start1,start2,npop,analysis="withem"){
+  k<-1
+  results<-list()
+  repeat{
+  set.seed(k+start1)
+  data.gen<-F.generate.pop2(size,scenario,prop)
+  data<-data.gen$data
+  j<-1
+  repeat{
+    set.seed(j+start2)
+    if (analysis=="withem"){
+      results[[((k-1)*iter+j)]]<-analysis.function.withem(data,size)
+    } else if(analysis=="withoutem"){
+      results[[((k-1)*iter+j)]]<-analysis.function.withoutem(data,size)
+    } else{
+      results[[((k-1)*iter+j)]]<-analysis.function.withoutemx1(data,size)
+    }
+    j<-j+1
+    print(j)
+    if(j==iter+1)break()}
+  k<-k+1
+  print(k)
+  if(k==npop+1)break()}
+  return(results)
+}
+```
+```{r Function for iterations same (LR)}
+resultswrap.same<-function(size,prop,scenario,iter,start1,start2,npop,analysis="withem"){
+  k<-1
+  results<-list()
+  repeat{
+  set.seed(k+start1)
+  data.gen<-F.generate.pop2(size,scenario,prop)
+  data<-data.gen$data
+  j<-1
+  repeat{
+    set.seed(j+start2)
+    if (analysis=="withem"){
+      results[[((k-1)*iter+j)]]<-analysis.function.withem.same(data,size)
+    } else if(analysis=="withoutem"){
+      results[[((k-1)*iter+j)]]<-analysis.function.withoutem.same(data,size)
+    } else{
+      results[[((k-1)*iter+j)]]<-analysis.function.withoutemx1.same(data,size)
+    }
+    j<-j+1
+    print(j)
+    if(j==iter+1)break()}
+  k<-k+1
+  print(k)
+  if(k==npop+1)break()}
+  return(results)
+}
+```
+```{r Function for iterations same (SL)}
+resultswrap.same2<-function(size,prop,scenario,iter,start1,start2,npop,analysis="withem"){
+  k<-1
+  results<-list()
+  repeat{
+  set.seed(k+start1)
+  data.gen<-F.generate.pop2(size,scenario,prop)
+  data<-data.gen$data
+  j<-1
+  repeat{
+    set.seed(j+start2)
+    if (analysis=="withem"){
+      results[[((k-1)*iter+j)]]<-analysis.function.withem.same2(data,size)
+    } else if(analysis=="withoutem"){
+      results[[((k-1)*iter+j)]]<-analysis.function.withoutem.same2(data,size)
+    } else{
+      results[[((k-1)*iter+j)]]<-analysis.function.withoutemx1.same2(data,size)
+    }
+    j<-j+1
+    print(j)
+    if(j==iter+1)break()}
+  k<-k+1
+  print(k)
+  if(k==npop+1)break()}
+  return(results)
+}
+```
+```{r Run iterations for multiple RCTs}
+iter <- 100
+
+results.withem<-resultswrap(size=10000,prop=-3.169,scenario="A",iter=iter,start1=1,start2=1,npop=1,analysis="withem") 
+results.withoutemx1<-resultswrap(size=10000,prop=-3.169,scenario="A",iter=iter,start1=1,start2=1,npop=1,analysis="withoutemx1")
+results.withoutem<-resultswrap(size=10000,prop=-3.169,scenario="A",iter=iter,start1=1,start2=1,npop=1,analysis="withoutem") 
+
+results.withem.same<-resultswrap.same(size=10000,prop=-3.169,scenario="A",iter=iter,start1=1,start2=1,npop=1,analysis="withem")
+results.withoutemx1.same<-resultswrap.same(size=10000,prop=-3.169,scenario="A",iter=iter,start1=1,start2=1,npop=1,analysis="withoutemx1")
+results.withoutem.same<-resultswrap.same(size=10000,prop=-3.169,scenario="A",iter=iter,start1=1,start2=1,npop=1,analysis="withoutem")
+
+results.withem.same2<-resultswrap.same2(size=10000,prop=-3.169,scenario="A",iter=iter,start1=1,start2=1,npop=1,analysis="withem")
+results.withoutemx1.same2<-resultswrap.same2(size=10000,prop=-3.169,scenario="A",iter=iter,start1=1,start2=1,npop=1,analysis="withoutemx1")
+results.withoutem.same2<-resultswrap.same2(size=10000,prop=-3.169,scenario="A",iter=iter,start1=1,start2=1,npop=1,analysis="withoutem") 
+
+save(results.withem, results.withoutem, results.withoutemx1, 
+     results.withem.same, results.withoutem.same, results.withoutemx1.same,
+     results.withem.same2, results.withoutem.same2, results.withoutemx1.same2,
+     file ="results_all_0507_100iter.RData")
+```
+
+
+# 3. get average of iterations
+```{r load data}
+load("/Users/results_all_0507_100iter.RData")
+```
+```{r Function to get average bias and MSE}
+average.results <- function(results) {
+  
+  #ASMD nrow and list should be adjusted when we change number of weights.
+  iter <- length(results)
+  averaged_result <- list()
+  
+  # Initialize a list to store averages
+  delta_true_list <- c()
+  delta_hat_list <- c()
+  delta_hat.unw_list <- c()
+  bias_list <- c()
+  bias.unw_list <- c()
+  MSE_list <- c()
+  MSE.unw_list <- c()
+  relativebias_list <- c()
+  
+  for (i in 1:iter){
+    delta_true_list   <-rbind(results[[i]]$delta_true,    delta_true_list)
+    delta_hat_list    <-rbind(results[[i]]$delta_hat,     delta_hat_list)
+    delta_hat.unw_list<-rbind(results[[i]]$delta_hat.unw, delta_hat.unw_list)
+    bias_list         <-rbind(results[[i]]$bias,          bias_list)
+    bias.unw_list     <-rbind(results[[i]]$bias.unw,      bias.unw_list)
+    MSE_list          <-rbind(results[[i]]$MSE,           MSE_list)
+    MSE.unw_list      <-rbind(results[[i]]$MSE.unw,       MSE.unw_list)
+    relativebias_list <-rbind(results[[i]]$relativebias,  relativebias_list)
+  }
+
+  # Calculate the averages
+  averaged_result$delta_true   <- apply(delta_true_list ,2, mean)
+  averaged_result$delta_hat    <- apply(delta_hat_list,2, mean)
+  averaged_result$delta_hat.unw<- apply(delta_hat.unw_list,2, mean)
+  averaged_result$bias         <-apply(bias_list ,2, mean)
+  averaged_result$bias.unw     <-apply(bias.unw_list,2, mean)
+  averaged_result$MSE          <-apply(MSE_list, 2, mean)
+  averaged_result$MSE.unw      <-apply(MSE.unw_list, 2, mean)
+  averaged_result$relativebias <-apply(relativebias_list, 2, mean)
+
+  return(averaged_result)
+}
+```
+```{r Run averaging function for bias and MSE}
+final.average.withem     <- average.results(results=results.withem)
+final.average.withoutem  <- average.results(results=results.withoutem)
+final.average.withoutemx1<- average.results(results=results.withoutemx1)
+
+final.average.withem.same     <- average.results(results=results.withem.same)
+final.average.withoutem.same  <- average.results(results=results.withoutem.same)
+final.average.withoutemx1.same<- average.results(results=results.withoutemx1.same)
+
+final.average.withem.same2     <- average.results(results=results.withem.same2)
+final.average.withoutem.same2  <- average.results(results=results.withoutem.same2)
+final.average.withoutemx1.same2<- average.results(results=results.withoutemx1.same2)
+
+#different weights
+diffw_bias <- round(data.frame(rbind(t(final.average.withem$bias),
+                 t(final.average.withoutemx1$bias),
+                 t(final.average.withoutem$bias))),4)
+#same weights (LR)
+samew_bias <- round(data.frame(rbind(t(final.average.withem.same$bias),
+                  t(final.average.withoutemx1.same$bias),
+                  t(final.average.withoutem.same$bias))),4)
+#same weights (SR)
+samew2_bias <- round(data.frame(rbind(t(final.average.withem.same2$bias),
+                  t(final.average.withoutemx1.same2$bias),
+                  t(final.average.withoutem.same2$bias))),4)
+```
+
+
+# 4. tables and plots
+```{r Function to get result tables for plot}
+results.function <- function(withem = final.average.withem,
+                             withoutemx1 = final.average.withoutemx1,
+                             withoutem = final.average.withoutem,
+                             filesuffx = '_diff_0414'){
+    
+  # 1) build data table
+    delta_true_result_table <- data.frame(rbind(withem$delta_true,
+                                                withoutemx1$delta_true,
+                                                withoutem$delta_true)) %>%
+      mutate(AdjustmentSets=c('All variables, including moderators of Y','All variables, except one moderator of Y','Only non-moderators of Y')) %>%
+      select(AdjustmentSets, everything()) %>%
+      pivot_longer(
+        cols = -AdjustmentSets, 
+        names_to = "Estimator",  
+        values_to = "Value"    
+      ) %>% mutate(Outcome=c('Outcome Y','Outcome Z',
+                             'Outcome Y','Outcome Z',
+                             'Outcome Y','Outcome Z'))
+    #
+    #
+    #2) delta_hat
+    delta_hat_result_table <- data.frame(rbind(withem$delta_hat,
+                                               withoutemx1$delta_hat,
+                                               withoutem$delta_hat)) %>%
+      mutate(AdjustmentSets=c('All variables, including moderators of Y','All variables, except one moderator of Y','Only non-moderators of Y')) %>%
+      select(AdjustmentSets, everything()) %>%
+      pivot_longer(cols = -AdjustmentSets, 
+                   names_to = "Estimator",  
+                   values_to = "Value") %>% 
+      mutate(Outcome=c(rep('Outcome Y',5), rep('Outcome Z', 5),
+                       rep('Outcome Y',5), rep('Outcome Z', 5),
+                       rep('Outcome Y',5), rep('Outcome Z', 5))) %>%
+      mutate(Estimator = ifelse(Estimator %in% c("IPSW.LR", "IPSW.LR.1"), "IPSW.LR", 
+                         ifelse(Estimator %in% c("IPSW.SL", "IPSW.SL.1"), "IPSW.SL",
+                         ifelse(Estimator %in% c("trueps","trueps.1"), "TruePS",     
+                         ifelse(Estimator %in% c("AIPW1", "AIPW1.1"), "AIPW",
+                         ifelse(Estimator %in% c("AIPW2", "AIPW2.1"), "AIPW_normalized",Estimator))))))
+    #
+    #
+    #3) delta_hat.unw
+    delta_hat.unw_result_table <- data.frame(rbind(withem$delta_hat.unw,
+                                                   withoutemx1$delta_hat.unw,
+                                                   withoutem$delta_hat.unw)) %>%
+      mutate(AdjustmentSets=c('All variables, including moderators of Y','All variables, except one moderator of Y','Only non-moderators of Y')) %>%
+      select(AdjustmentSets, everything()) %>%
+      pivot_longer(cols = -AdjustmentSets, 
+                   names_to = "Estimator",  
+                   values_to = "Value") %>% 
+      mutate(Outcome=c(rep('Outcome Y',1), rep('Outcome Z', 1),
+                       rep('Outcome Y',1), rep('Outcome Z', 1),
+                       rep('Outcome Y',1), rep('Outcome Z', 1))) %>%
+      mutate(Estimator = ifelse(Estimator %in% c("IPSW_res.unw", "IPSW_res_k.unw"), "Unadjusted", Estimator))
+
+    #
+    #
+    #4) bias
+    bias_result_table <- data.frame(rbind(withem$bias,
+                                          withoutemx1$bias,
+                                          withoutem$bias)) %>%
+      mutate(AdjustmentSets=c('All variables, including moderators of Y','All variables, except one moderator of Y','Only non-moderators of Y')) %>%
+      select(AdjustmentSets, everything()) %>%
+      pivot_longer(cols = -AdjustmentSets, 
+                   names_to = "Estimator",  
+                   values_to = "Value") %>% 
+      mutate(Outcome=c(rep('Outcome Y',5), rep('Outcome Z', 5),
+                       rep('Outcome Y',5), rep('Outcome Z', 5),
+                       rep('Outcome Y',5), rep('Outcome Z', 5))) %>%
+      mutate(Estimator = ifelse(Estimator %in% c("IPSW.LR", "IPSW.LR.1"), "IPSW.LR", 
+                         ifelse(Estimator %in% c("IPSW.SL", "IPSW.SL.1"), "IPSW.SL",
+                         ifelse(Estimator %in% c("trueps","trueps.1"), "TruePS",     
+                         ifelse(Estimator %in% c("AIPW1", "AIPW1.1"), "AIPW",
+                         ifelse(Estimator %in% c("AIPW2", "AIPW2.1"), "AIPW_normalized",Estimator))))))
+    #
+    #
+    #5) bias.unw
+    bias.unw_result_table <- data.frame(rbind(withem$bias.unw,
+                                          withoutemx1$bias.unw,
+                                          withoutem$bias.unw)) %>%
+      mutate(AdjustmentSets=c('All variables, including moderators of Y','All variables, except one moderator of Y','Only non-moderators of Y')) %>%
+      select(AdjustmentSets, everything()) %>%
+      pivot_longer(cols = -AdjustmentSets, 
+                   names_to = "Estimator",  
+                   values_to = "Value") %>% 
+      mutate(Outcome=c(rep('Outcome Y',1), rep('Outcome Z', 1),
+                       rep('Outcome Y',1), rep('Outcome Z', 1),
+                       rep('Outcome Y',1), rep('Outcome Z', 1))) %>%
+      mutate(Estimator = ifelse(Estimator %in% c("bias.unw", "bias.unw_k"), "Unadjusted", Estimator))
+
+    #
+    #
+    #6) MSE 
+    MSE_result_table <- data.frame(rbind(withem$MSE,
+                                         withoutemx1$MSE,
+                                         withoutem$MSE)) %>%
+      mutate(AdjustmentSets=c('All variables, including moderators of Y','All variables, except one moderator of Y','Only non-moderators of Y')) %>%
+      select(AdjustmentSets, everything()) %>%
+      pivot_longer(cols = -AdjustmentSets, 
+                   names_to = "Estimator", 
+                   values_to = "Value") %>% 
+      mutate(Outcome=c(rep('Outcome Y',5), rep('Outcome Z', 5),
+                       rep('Outcome Y',5), rep('Outcome Z', 5),
+                       rep('Outcome Y',5), rep('Outcome Z', 5))) %>%
+      mutate(Estimator = ifelse(Estimator %in% c("IPSW.LR", "IPSW.LR.1"), "IPSW.LR", 
+                         ifelse(Estimator %in% c("IPSW.SL", "IPSW.SL.1"), "IPSW.SL",
+                         ifelse(Estimator %in% c("trueps","trueps.1"), "TruePS",     
+                         ifelse(Estimator %in% c("AIPW1", "AIPW1.1"), "AIPW",
+                         ifelse(Estimator %in% c("AIPW2", "AIPW2.1"), "AIPW_normalized",Estimator))))))
+    
+    #
+    #
+    #7) MSE.unw
+    MSE.unw_result_table <- data.frame(rbind(withem$MSE.unw,
+                                             withoutemx1$MSE.unw,
+                                             withoutem$MSE.unw)) %>%
+      mutate(AdjustmentSets=c('All variables, including moderators of Y','All variables, except one moderator of Y','Only non-moderators of Y')) %>%
+      select(AdjustmentSets, everything()) %>%
+      pivot_longer(cols = -AdjustmentSets, 
+                   names_to = "Estimator", 
+                   values_to = "Value") %>% 
+      mutate(Outcome=c(rep('Outcome Y',1), rep('Outcome Z', 1),
+                       rep('Outcome Y',1), rep('Outcome Z', 1),
+                       rep('Outcome Y',1), rep('Outcome Z', 1))) %>%
+      mutate(Estimator = ifelse(Estimator %in% c("MSE.unw", "MSE.unw_k"), "Unadjusted", Estimator))
+
+    #
+    #
+    #8) relative bias
+    relativebias_result_table <- data.frame(rbind(withem$relativebias,
+                                                  withoutem$relativebias,
+                                                  withoutemx1$relativebias)) %>%
+      mutate(AdjustmentSets=c('All variables, including moderators of Y','All variables, except one moderator of Y','Only non-moderators of Y')) %>%
+      select(AdjustmentSets, everything()) %>%
+      pivot_longer( cols = -AdjustmentSets, 
+                    names_to = "Estimator", 
+                    values_to = "Value") %>% 
+      mutate(Outcome=c(rep('Outcome Y',5), rep('Outcome Z', 5),
+                       rep('Outcome Y',5), rep('Outcome Z', 5),
+                       rep('Outcome Y',5), rep('Outcome Z', 5))) %>%
+      mutate(Estimator = ifelse(Estimator %in% c("IPSW.LR", "IPSW.LR.1"), "IPSW.LR", 
+                         ifelse(Estimator %in% c("IPSW.SL", "IPSW.SL.1"), "IPSW.SL",
+                         ifelse(Estimator %in% c("trueps","trueps.1"), "TruePS",     
+                         ifelse(Estimator %in% c("AIPW1", "AIPW1.1"), "AIPW",
+                         ifelse(Estimator %in% c("AIPW2", "AIPW2.1"), "AIPW_normalized",Estimator))))))
+    
+    #
+    #
+    result_tables <- list(delta_true=delta_true_result_table,
+                          delta_hat=delta_hat_result_table,
+                          delta_hat.unw=delta_hat.unw_result_table,
+                          bias=bias_result_table,
+                          bias.unw = bias.unw_result_table,
+                          MSE=MSE_result_table,
+                          MSE.unw=MSE.unw_result_table,
+                          relativebias=relativebias_result_table)
+    
+    return(result_tables)
+    
+}
+
+```
+```{r Run result function}
+#Just for getting table
+diffw_table <- results.function(withem = final.average.withem,
+                             withoutem = final.average.withoutem,
+                             withoutemx1 = final.average.withoutemx1,
+                             filesuffx = 'diffw_0507')
+samew_table <- results.function(withem = final.average.withem.same,
+                             withoutem = final.average.withoutem.same,
+                             withoutemx1 = final.average.withoutemx1.same,
+                             filesuffx = 'samew_1001')
+samew2_table <- results.function(withem = final.average.withem.same2,
+                             withoutem = final.average.withoutem.same2,
+                             withoutemx1 = final.average.withoutemx1.same2,
+                             filesuffx = 'samew2_0507')
+```
+```{r modify to remove one of SL and LR for plots}
+#Keep LR only
+bias.unw <- samew_table$bias.unw #30 x 4
+bias <- samew_table$bias #30 x 4
+MSE <- samew_table$MSE
+MSE.unw <- samew_table$MSE.unw
+
+#Keep SL only
+bias.unw2 <- samew2_table$bias.unw #30 x 4
+bias2 <- samew2_table$bias
+MSE2 <- samew2_table$MSE
+MSE.unw2 <- samew2_table$MSE.unw
+
+#Check results
+bias
+bias.unw
+MSE
+MSE.unw
+```
+```{r Function to combine data and draw plots (LR)}
+create_plots.LR <- function(metric_data = bias,
+                            unw_data = bias.unw,
+                            metric="bias", metric_name="Bias", filesuffx="LR_0507"){
+  
+  if (metric %in% c("bias","MSE")){
+    combined_data <- rbind(unw_data, metric_data)
+    combined_data <- combined_data %>% filter(Estimator != "TruePS") %>% filter(Estimator != "IPSW.SL")
+    combined_data$Estimator <- factor(combined_data$Estimator, 
+                                    levels = c('AIPW_normalized','AIPW',
+                                               'IPSW.LR','Unadjusted'))
+    combined_data.unadj <- combined_data %>% filter(Estimator == "Unadjusted")
+    combined_data.adj <- combined_data %>% filter(Estimator != "Unadjusted")
+    combined_data.unadj <- combined_data.unadj %>%
+      slice(1:2) %>% mutate(AdjustmentSets = ifelse(AdjustmentSets == "All variables, including moderators of Y", "Unadjusted", AdjustmentSets))
+    combined_data <- rbind(combined_data.unadj,combined_data.adj)
+    
+  }else{
+    combined_data <- metric_data
+    combined_data <- combined_data %>% filter(Estimator != "TruePS") %>% filter(Estimator != "IPSW.SL")
+    combined_data$Estimator <- factor(combined_data$Estimator, 
+                                    levels = c('AIPW_normalized','AIPW',
+                                               'IPSW.LR'))
+  }
+  
+  #Final data for plot
+  combined_data$Outcome <- factor(combined_data$Outcome, levels = c("Outcome Y", "Outcome Z"))
+  combined_data$AdjustmentSets <- factor(combined_data$AdjustmentSets, 
+                                          levels = c('All variables, including moderators of Y',
+                                                     'All variables, except one moderator of Y',
+                                                     'Only non-moderators of Y', 
+                                                     'Unadjusted'))
+  combined_data$bar_width <- ifelse(combined_data$AdjustmentSets == "Unadjusted", 0.9, 0.9)
+ 
+
+  #Plot
+  plot1 <- ggplot(combined_data, aes(x = Value, y = Estimator, fill = AdjustmentSets, width = bar_width)) +
+  geom_col(position = position_dodge2(preserve = "single")) +
+  geom_text(aes(label = round(Value, 2), 
+                hjust = ifelse(Value < 0, 1.1, -0.1)), 
+            position = position_dodge2(width = 0.9, preserve = "single"),
+            size = 4) +
+  facet_grid(Outcome ~ ., scales = "free_x") + 
+  theme_minimal()+ 
+    scale_fill_manual(values = c(
+    'Only non-moderators of Y' = "#E69F00", 
+    'All variables, except one moderator of Y' = "#56B4E9", 
+    'All variables, including moderators of Y' = "#009E73",
+    'Unadjusted' = "#9400D3")) +
+  guides(fill = guide_legend(reverse = TRUE)) +
+  labs(x = metric_name, y = "AdjustmentSets", fill = "Adjustment Sets",
+       title = paste0(metric_name, " Across Different Estimator and Outcome")) +
+  scale_x_continuous(expand = expansion(mult = c(0.1, 0.1))) + 
+  theme(
+    strip.background = element_rect(color = "gray", fill = "gray", linewidth = 0.5), 
+    strip.text = element_text(size = 16, face = "bold", color = "black"), 
+    panel.border = element_rect(color = "gray", fill = NA, linewidth = 0.5), 
+    panel.grid.major.x = element_line(color = "gray", linetype = "dotted"), 
+    axis.title.y = element_blank(), 
+    axis.ticks.y.right = element_blank(), 
+    axis.text.x = element_text(size = 14), 
+    axis.text.y = element_text(size = 14),
+    axis.title.x = element_text(size = 16), 
+    legend.text = element_text(size = 12), 
+    legend.title = element_text(size = 16), 
+    plot.title = element_text(size = 16), 
+    legend.position = "right",
+    legend.background = element_rect(color = "gray"), 
+    legend.key = element_rect(fill = "gray", color = "gray")
+  )
+  ggsave(paste0("plot.same1_", metric, "_", filesuffx,".png"), plot = plot1, width = 12, height = 5)
+}
+
+```
+```{r Function to combine data and draw plots (LR) - update font for paper}
+install.packages("extrafont")
+library(extrafont)
+font_import()  # just one time when beginning.
+loadfonts(device = "pdf") # Windows
+
+install.packages("showtext")
+library(showtext)
+font_add("Times New Roman", "/System/Library/Fonts/Supplemental/Times New Roman.ttf")
+showtext_auto()
+
+create_plots.LR <- function(metric_data = bias,
+                            unw_data = bias.unw,
+                            metric="bias", metric_name="Bias", filesuffx="LR_1001"){
+  
+  if (metric %in% c("bias","MSE")){
+    combined_data <- rbind(unw_data, metric_data)
+    combined_data <- combined_data %>% filter(Estimator != "TruePS") %>% filter(Estimator != "IPSW.SL")
+    combined_data$Estimator <- factor(combined_data$Estimator, 
+                                    levels = c('AIPW_normalized','AIPW',
+                                               'IPSW.LR','Unadjusted'))
+    combined_data.unadj <- combined_data %>% filter(Estimator == "Unadjusted")
+    combined_data.adj <- combined_data %>% filter(Estimator != "Unadjusted")
+    combined_data.unadj <- combined_data.unadj %>%
+      slice(1:2) %>% mutate(AdjustmentSets = ifelse(AdjustmentSets == "All variables, including moderators of Y", "Unadjusted", AdjustmentSets))
+    combined_data <- rbind(combined_data.unadj,combined_data.adj)
+    
+  }else{
+    combined_data <- metric_data
+    combined_data <- combined_data %>% filter(Estimator != "TruePS") %>% filter(Estimator != "IPSW.SL")
+    combined_data$Estimator <- factor(combined_data$Estimator, 
+                                    levels = c('AIPW_normalized','AIPW',
+                                               'IPSW.LR'))
+  }
+  
+  #Final data for plot
+  combined_data$Outcome <- factor(combined_data$Outcome, levels = c("Outcome Y", "Outcome Z"))
+  combined_data$AdjustmentSets <- factor(combined_data$AdjustmentSets, 
+                                          levels = c('All variables, including moderators of Y',
+                                                     'All variables, except one moderator of Y',
+                                                     'Only non-moderators of Y', 
+                                                     'Unadjusted'))
+  combined_data$bar_width <- ifelse(combined_data$AdjustmentSets == "Unadjusted", 0.9, 0.9)
+ 
+
+  #Plot
+  plot1 <- ggplot(combined_data, aes(x = Value, y = Estimator, fill = AdjustmentSets, width = bar_width)) +
+  geom_col(position = position_dodge2(preserve = "single")) +
+  geom_text(aes(label = round(Value, 2), 
+                hjust = ifelse(Value < 0, 1.1, -0.1)), 
+            position = position_dodge2(width = 0.9, preserve = "single"),
+            size = 8, family = "Times New Roman") +
+  facet_grid(Outcome ~ ., scales = "free_x") + 
+  theme_minimal(base_family = "Times New Roman") +   
+  scale_fill_manual(values = c(
+    'Only non-moderators of Y' = "#E69F00", 
+    'All variables, except one moderator of Y' = "#56B4E9", 
+    'All variables, including moderators of Y' = "#009E73",
+    'Unadjusted' = "#9400D3")) +
+  guides(fill = guide_legend(reverse = TRUE)) +
+  labs(x = metric_name, y = "AdjustmentSets", fill = "Adjustment Sets",
+       title = paste0(metric_name, " by Estimator and Outcome")) +
+  scale_x_continuous(expand = expansion(mult = c(0.1, 0.1))) + 
+  theme(
+    strip.background = element_rect(color = "gray", fill = "gray", linewidth = 0.5), 
+    strip.text = element_text(size = 26, face = "bold", color = "black", family = "Times New Roman"), 
+    panel.border = element_rect(color = "gray", fill = NA, linewidth = 0.5), 
+    panel.grid.major.x = element_line(color = "gray", linetype = "dotted"), 
+    axis.title.y = element_blank(), 
+    axis.ticks.y.right = element_blank(), 
+    axis.text.x = element_text(size = 26, family = "Times New Roman"), 
+    axis.text.y = element_text(size = 26, family = "Times New Roman"),
+    axis.title.x = element_text(size = 26, family = "Times New Roman"), 
+    legend.text = element_text(size = 26, family = "Times New Roman", face = "bold"), 
+    legend.title = element_text(size = 26, family = "Times New Roman"), 
+    plot.title = element_text(size = 34, family = "Times New Roman", face = "bold"), 
+    legend.position = "right",
+    legend.background = element_rect(color = "gray"), 
+    legend.key = element_rect(fill = "gray", color = "gray")
+  ) 
+  
+  ggsave(paste0("Figure_", metric, "_", filesuffx,".png"), plot = plot1, width = 8, height = 4, dpi=300)
+}
+
+```
+```{r Function to combine data and draw plots (SL)}
+create_plots.SL <- function(metric_data = bias,
+                            unw_data = bias.unw,
+                            metric="bias", metric_name="Bias", filesuffx="SL_0414"){
+  
+  if (metric %in% c("bias","MSE")){
+    combined_data <- rbind(unw_data, metric_data)
+    combined_data <- combined_data %>% filter(Estimator != "TruePS") %>% filter(Estimator != "IPSW.LR")
+    combined_data$Estimator <- factor(combined_data$Estimator, 
+                                    levels = c('AIPW_normalized','AIPW',
+                                               'IPSW.SL','Unadjusted'))
+    combined_data.unadj <- combined_data %>% filter(Estimator == "Unadjusted")
+    combined_data.adj <- combined_data %>% filter(Estimator != "Unadjusted")
+    combined_data.unadj <- combined_data.unadj %>%
+      slice(1:2) %>% mutate(AdjustmentSets = ifelse(AdjustmentSets == "All variables, including moderators of Y", "Unadjusted", AdjustmentSets))
+    combined_data <- rbind(combined_data.unadj,combined_data.adj)
+    
+  }else{
+    combined_data <- metric_data
+    combined_data <- combined_data %>% filter(Estimator != "TruePS")
+    combined_data$Estimator <- factor(combined_data$Estimator, 
+                                    levels = c('AIPW_normalized','AIPW',
+                                               'IPSW.SL'))
+  }
+  
+  #Final data for plot
+  combined_data$Outcome <- factor(combined_data$Outcome, levels = c("Outcome Y", "Outcome Z"))
+  combined_data$AdjustmentSets <- factor(combined_data$AdjustmentSets, 
+                                          levels = c('All variables, including moderators of Y',
+                                                     'All variables, except one moderator of Y', 
+                                                     'Only non-moderators of Y',
+                                                     'Unadjusted'))
+  combined_data$bar_width <- ifelse(combined_data$AdjustmentSets == "Unadjusted", 0.9, 0.9)
+
+  #Plot
+  plot2 <- ggplot(combined_data, aes(x = Value, y = Estimator, fill = AdjustmentSets, width = bar_width)) +
+    geom_col(position = position_dodge2(preserve = "single")) +
+    geom_text(aes(label = round(Value, 2), 
+                  hjust = ifelse(Value < 0, 1.1, -0.1)), 
+              position = position_dodge2(width = 0.9, preserve = "single"),
+              size = 4) +
+    facet_grid(Outcome ~ ., scales = "free_x") + 
+    theme_minimal() + 
+    scale_fill_manual(values = c(
+    'Only non-moderators of Y' = "#E69F00", 
+    'All variables, except one moderator of Y' = "#56B4E9", 
+    'All variables, including moderators of Y' = "#009E73",
+    'Unadjusted' = "#9400D3")) +
+    guides(fill = guide_legend(reverse = TRUE)) +
+    labs(x = metric_name, y = "AdjustmentSets", fill = "Adjustment Sets",
+         title = paste0(metric_name, " Across Different Estimator and Outcome")) +
+    scale_x_continuous(expand = expansion(mult = c(0.1, 0.1))) + 
+    theme(
+      strip.background = element_rect(color = "gray", fill = "gray", linewidth = 0.5), 
+      strip.text = element_text(size = 16, face = "bold", color = "black"), 
+      panel.border = element_rect(color = "gray", fill = NA, linewidth = 0.5), 
+      panel.grid.major.x = element_line(color = "gray", linetype = "dotted"), 
+      axis.title.y = element_blank(), 
+      axis.ticks.y.right = element_blank(), 
+      axis.text.x = element_text(size = 14), 
+      axis.text.y = element_text(size = 14),
+      axis.title.x = element_text(size = 16), 
+      legend.text = element_text(size = 12), 
+      legend.title = element_text(size = 16), 
+      plot.title = element_text(size = 16), 
+      legend.position = "right",
+      legend.background = element_rect(color = "gray"), 
+      legend.key = element_rect(fill = "gray", color = "gray")
+    )
+  ggsave(paste0("plot.same2_", metric, "_", filesuffx,".png"), plot = plot1, width = 12, height = 5)
+}
+```
+```{r Run functions plots}
+create_plots.LR(metric_data = bias, unw_data = bias.unw, metric="bias", metric_name="Bias", filesuffx="1001_samew1")
+create_plots.LR(metric_data = MSE, unw_data = MSE.unw, metric="MSE", metric_name="MSE", filesuffx="1001_samew1")
+create_plots.SL(metric_data = bias2, unw_data = bias.unw2, metric="bias", metric_name="Bias", filesuffx="0507_samew2")
+create_plots.SL(metric_data = MSE2, unw_data = MSE.unw2, metric="MSE", metric_name="MSE", filesuffx="0507_samew2")
+```
+```{r Function to get result tables html}
+results.function.html <- function(withem = final.average.withem.same,
+                             withoutemx1 = final.average.withoutemx1.same,
+                             withoutem = final.average.withoutem.same,
+                             filesuffx = 'same1_0507',
+                             whichweight="IPSW.LR"){
+    
+    ############## Tables for papers ############## 
+    custom_colnames <- c("Adjustment Sets", rep(c("Unadj", whichweight,'AIPW','AIPW<br>normalized'), 2))
+    
+    #bias table
+    bias.unw <- data.frame(rbind(withem$bias.unw, withoutemx1$bias.unw, withoutem$bias.unw)) 
+    bias.unw <- apply(bias.unw, 2, function(x) ifelse(is.na(x), NA, formatC(x, format = "f", digits = 3))) %>%  as.data.frame() %>%  slice(1)
+    bias_result_table <- data.frame(rbind(withem$bias, withoutemx1$bias, withoutem$bias))
+    bias_result_table <- apply(bias_result_table, 2, function(x) ifelse(is.na(x), NA, formatC(x, format = "f", digits = 3))) %>% 
+                         as.data.frame() %>%
+                         mutate(AdjustmentSets = c('All variables, including moderators of Y','All variables, except one moderator of Y','Only non-moderators of Y')) %>%
+                         mutate(Unadj = '-', Unadj.1 = '-') %>%
+                         rbind('-') %>%
+                         select('AdjustmentSets', Unadj, whichweight, 'AIPW1', 'AIPW2', Unadj.1, paste0(whichweight, ".1"), 'AIPW1.1', 'AIPW2.1')
+    bias_result_table[4, 1] <- "Unadjusted"
+    bias_result_table[4, 2] <- bias.unw[1, 1]
+    bias_result_table[4, 6] <- bias.unw[1, 2]
+    bias_result_table2 <- bias_result_table %>%
+        slice(n():1) %>%  # Reverse the row order
+        kbl(caption = "Bias of Estimated Treatment Effects",
+            col.names = custom_colnames,
+            escape = FALSE) %>%
+        kable_classic(full_width = FALSE, html_font = "Cambria") %>%
+        add_header_above(c(" " = 1, "Outcome Y" = 4, "Outcome Z" = 4)) %>%
+        column_spec(2:ncol(bias_result_table), extra_css = "text-align: right;") %>%
+        row_spec(0, extra_css = "text-align: center;") %>% 
+        save_kable(paste0("Bias_paper_", filesuffx, ".html")) %>%
+        webshot(paste0("Bias_paper_", filesuffx, ".html"), file = paste0("Bias_paper_", filesuffx, ".png"))
+    
+    #MSE table
+    MSE.unw <- data.frame(rbind(withem$MSE.unw, withoutemx1$MSE.unw, withoutem$MSE.unw)) 
+    MSE.unw <- apply(MSE.unw, 2, function(x) ifelse(is.na(x), NA, formatC(x, format = "f", digits = 3))) %>%  as.data.frame() %>%  slice(1)
+    MSE_result_table <- data.frame(rbind(withem$MSE, withoutemx1$MSE, withoutem$MSE))
+    MSE_result_table <- apply(MSE_result_table, 2, function(x) ifelse(is.na(x), NA, formatC(x, format = "f", digits = 3))) %>% 
+                         as.data.frame() %>%
+                         mutate(AdjustmentSets = c('All variables, including moderators of Y','All variables, except one moderator of Y','Only non-moderators of Y')) %>%
+                         mutate(Unadj = '-', Unadj.1 = '-') %>%
+                         rbind('-') %>%
+                         select('AdjustmentSets', Unadj, whichweight, 'AIPW1', 'AIPW2', Unadj.1, paste0(whichweight, ".1"), 'AIPW1.1', 'AIPW2.1')
+    MSE_result_table[4, 1] <- "Unadjusted"
+    MSE_result_table[4, 2] <- MSE.unw[1, 1]
+    MSE_result_table[4, 6] <- MSE.unw[1, 2]
+    MSE_result_table2 <- MSE_result_table %>%
+        slice(n():1) %>%  # Reverse the row order
+        kbl(caption = "MSE of Estimated Treatment Effects",
+            col.names = custom_colnames,
+            escape = FALSE) %>%
+        kable_classic(full_width = FALSE, html_font = "Cambria") %>%
+        add_header_above(c(" " = 1, "Outcome Y" = 4, "Outcome Z" = 4)) %>%
+        column_spec(2:ncol(MSE_result_table), extra_css = "text-align: right;") %>%
+        row_spec(0, extra_css = "text-align: center;") %>% 
+        save_kable(paste0("MSE_paper_", filesuffx, ".html")) %>%
+        webshot(paste0("MSE_paper_", filesuffx, ".html"), file = paste0("MSE_paper_", filesuffx, ".png"))
+
+    ###########################################################
+    
+    custom_colnames <- c("Adjustment Sets", rep(c(whichweight,'AIPW','AIPW<br>normalized'), 2))
+
+    #1)delta bat
+    delta_hat_result_table <- data.frame(rbind(withem$delta_hat,
+                                               withoutemx1$delta_hat,
+                                               withoutem$delta_hat)) %>%
+                              select(whichweight, 'AIPW1', 'AIPW2', paste0(whichweight, ".1"), 'AIPW1.1', 'AIPW2.1')
+    delta_hat_result_table <- apply(delta_hat_result_table, 2, function(x) ifelse(is.na(x), NA, formatC(x, format = "f", digits = 3))) %>% as.data.frame() %>%
+                              mutate(AdjustmentSets = c('All variables, including moderators of Y','All variables, except one moderator of Y','Only non-moderators of Y')) %>%
+                              select('AdjustmentSets', whichweight, 'AIPW1', 'AIPW2', paste0(whichweight,".1"), 'AIPW1.1', 'AIPW2.1') %>%
+                              slice(n():1) %>%  # Reverse the row order
+                              kbl(caption = paste0("Estimated Treatment Effects"), col.names = custom_colnames, escape = FALSE) %>%
+                              kable_classic(full_width = F, html_font = "Cambria") %>%
+                              add_header_above(c(" ", "Outcome Y" = 3, "Outcome Z" = 3)) %>%
+                              column_spec(2:ncol(delta_hat_result_table)+1, extra_css = "text-align: right;") %>%
+                              row_spec(0, extra_css = "text-align: center;") %>% 
+                              save_kable(paste0("Estimates_table_", filesuffx, ".html")) %>%
+                              webshot(paste0("Estimates_table_", filesuffx, ".html"), file = paste0("Estimates_table_", filesuffx, ".png"))
+
+    #2)bias
+    bias_result_table <- data.frame(rbind(withem$bias,
+                                          withoutemx1$bias,
+                                          withoutem$bias)) %>%
+                         select(whichweight, 'AIPW1', 'AIPW2', paste0(whichweight, ".1"), 'AIPW1.1', 'AIPW2.1')
+    bias_result_table <- apply(bias_result_table, 2, function(x) ifelse(is.na(x), NA, formatC(x, format = "f", digits = 3))) %>% as.data.frame() %>%
+                         mutate(AdjustmentSets = c('All variables, including moderators of Y','All variables, except one moderator of Y','Only non-moderators of Y')) %>%
+                         select('AdjustmentSets', whichweight, 'AIPW1', 'AIPW2', paste0(whichweight,".1"), 'AIPW1.1', 'AIPW2.1') %>%
+                         slice(n():1) %>%  # Reverse the row order
+                         kbl(caption = paste0("Bias of Estimated Treatment Effects"), col.names = custom_colnames, escape = FALSE) %>%
+                         kable_classic(full_width = F, html_font = "Cambria") %>%
+                         add_header_above(c(" ", "Outcome Y" = 3, "Outcome Z" = 3)) %>%
+                         column_spec(2:ncol(bias_result_table)+1, extra_css = "text-align: right;") %>%
+                         row_spec(0, extra_css = "text-align: center;") %>% 
+                         save_kable(paste0("Bias_table_", filesuffx, ".html")) %>%
+                         webshot(paste0("Bias_table_", filesuffx, ".html"), file = paste0("Bias_table_", filesuffx, ".png"))
+    
+    #3) MSE
+    MSE_result_table <- data.frame(rbind(withem$MSE,
+                                         withoutemx1$MSE,
+                                         withoutem$MSE)) %>%
+                        select(whichweight, 'AIPW1', 'AIPW2', paste0(whichweight, ".1"), 'AIPW1.1', 'AIPW2.1')
+    MSE_result_table <- apply(MSE_result_table, 2, function(x) ifelse(is.na(x), NA, formatC(x, format = "f", digits = 3))) %>% as.data.frame() %>%
+                        mutate(AdjustmentSets = c('All variables, including moderators of Y','All variables, except one moderator of Y','Only non-moderators of Y')) %>%
+                        select('AdjustmentSets', whichweight, 'AIPW1', 'AIPW2', paste0(whichweight,".1"), 'AIPW1.1', 'AIPW2.1') %>%
+                        slice(n():1) %>%  # Reverse the row order
+                        kbl(caption = paste0("MSE of Estimated Treatment Effects"), col.names = custom_colnames, escape = FALSE) %>%
+                        kable_classic(full_width = F, html_font = "Cambria") %>%
+                        add_header_above(c(" ", "Outcome Y" = 3, "Outcome Z" = 3)) %>%
+                        column_spec(2:ncol(MSE_result_table)+1, extra_css = "text-align: right;") %>%
+                        row_spec(0, extra_css = "text-align: center;") %>% 
+                        save_kable(paste0("MSE_table_", filesuffx, ".html")) %>%
+                        webshot(paste0("MSE_table_", filesuffx, ".html"), file = paste0("MSE_table_", filesuffx, ".png"))
+    
+    #4) relative bias
+    relativebias_result_table <- data.frame(rbind(withem$relativebias,
+                                                  withoutemx1$relativebias,
+                                                  withoutem$relativebias)) %>%
+                                 select(whichweight, 'AIPW1', 'AIPW2', paste0(whichweight, ".1"), 'AIPW1.1', 'AIPW2.1')
+    relativebias_result_table <- apply(relativebias_result_table, 2, function(x) ifelse(is.na(x), NA, formatC(x, format = "f", digits = 3))) %>% as.data.frame() %>%
+                                 mutate(AdjustmentSets = c('All variables, including moderators of Y','All variables, except one moderator of Y','Only non-moderators of Y')) %>%
+                                 select('AdjustmentSets', whichweight, 'AIPW1', 'AIPW2', paste0(whichweight,".1"), 'AIPW1.1', 'AIPW2.1') %>%
+                                 slice(n():1) %>%  # Reverse the row order
+                                 kbl(caption = paste0("Relative Bias of Estimated Treatment Effects"), col.names = custom_colnames, escape = FALSE) %>%
+                                 kable_classic(full_width = F, html_font = "Cambria") %>%
+                                 add_header_above(c(" ", "Outcome Y" = 3, "Outcome Z" = 3)) %>%
+                                 column_spec(2:ncol(relativebias_result_table)+1, extra_css = "text-align: right;") %>%
+                                 row_spec(0, extra_css = "text-align: center;") %>% 
+                                 save_kable(paste0("RelativeBias_table_", filesuffx, ".html")) %>%
+                                 webshot(paste0("RelativeBias_table_", filesuffx, ".html"), file = paste0("RelativeBias_table_", filesuffx, ".png"))
+    
+}
+```
+```{r Run functions html}
+results.function.html(withem = final.average.withem.same,
+                      withoutem = final.average.withoutem.same,
+                      withoutemx1 = final.average.withoutemx1.same,
+                      filesuffx = 'same1_0507',
+                      whichweight="IPSW.LR")
+results.function.html(withem = final.average.withem.same2,
+                      withoutem = final.average.withoutem.same2,
+                      withoutemx1 = final.average.withoutemx1.same2,
+                      filesuffx = 'same2_0507',
+                      whichweight="IPSW.SL")
+```
+
+
+
