@@ -14,4 +14,4 @@ To reproduce the simulation result, please follow these steps:
 2. Then run the functions in the Rmd file to get estimates. Function names are 'analysis.function.withem.same', 'analysis.function.withoutemx1.same', 'analysis.function.withoutem.same'.
 3. Run the function called 'resultswrap.same' with the number of iterations you would like to.
 4. Run the function called 'average.results' and you will get the averaged metrics of the iterated results.
-5. Get the plots and tables with the functions 'create_plots.LR' or 'results.function.html'.
+5. Get the plots and tables with the functions such as 'create_plots' or 'results.function.html'.
